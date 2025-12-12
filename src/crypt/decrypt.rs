@@ -1,9 +1,15 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::{
-    crypt::{calc_intermediate_vector, detector::{Detector, Oracle, SimpleDetector}},
+    crypt::{
+        calc_intermediate_vector,
+        detector::{Detector, Oracle, SimpleDetector},
+    },
     errors::DecryptError,
     helper::Config,
 };
@@ -18,7 +24,7 @@ pub async fn padding_oracle_decrypt<O: Oracle>(
     // classic padding oracle
     if let Ok(classic_detector) = SimpleDetector::init(ct, oracle, blk_size, threads).await {
         return _padding_decrypt(ct, classic_detector, blk_size).await;
-    } 
+    }
     Err(DecryptError::CouldNotDecryptClassic(
         "No padding oracle found".into(),
     ))
@@ -41,7 +47,8 @@ async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
 
     let detector_shared = Arc::new(detector);
 
-    let plaintext_blocks_shared: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(vec![vec![]; blocks.len()-1]));
+    let plaintext_blocks_shared: Arc<Mutex<Vec<Vec<u8>>>> =
+        Arc::new(Mutex::new(vec![vec![]; blocks.len() - 1]));
     let mut futures_set = JoinSet::new();
     let decrypt_error_shared = Arc::new(AtomicBool::new(false));
     // decrypt ct
@@ -57,7 +64,7 @@ async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
 
             let intermediate_vector =
                 calc_intermediate_vector(&current_blocks[0], &current_blocks[1], detector).await;
-            if intermediate_vector.is_err(){
+            if intermediate_vector.is_err() {
                 decrypt_error.fetch_or(true, Ordering::SeqCst);
                 return;
             }
@@ -73,9 +80,15 @@ async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
         });
     }
     futures_set.join_all().await;
-    if decrypt_error_shared.load(Ordering::SeqCst){
-        return Err(DecryptError::CouldNotDecryptClassic("Error: could not find intermediate block".to_string()));
+    if decrypt_error_shared.load(Ordering::SeqCst) {
+        return Err(DecryptError::CouldNotDecryptClassic(
+            "Error: could not find intermediate block".to_string(),
+        ));
     }
     let plaintext_blocks_acquired = plaintext_blocks_shared.lock().await;
-    Ok(plaintext_blocks_acquired.iter().flatten().cloned().collect())
+    Ok(plaintext_blocks_acquired
+        .iter()
+        .flatten()
+        .cloned()
+        .collect())
 }

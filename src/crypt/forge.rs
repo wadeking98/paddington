@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use crate::{
-    crypt::{calc_intermediate_vector, detector::{Detector, Oracle, SimpleDetector}},
+    crypt::{
+        calc_intermediate_vector,
+        detector::{Detector, Oracle, SimpleDetector},
+    },
     errors::DecryptError,
     helper::Config,
 };
@@ -17,7 +20,7 @@ pub async fn padding_oracle_forge<O: Oracle>(
     // classic padding oracle
     if let Ok(classic_detector) = SimpleDetector::init(ct, oracle, blk_size, threads).await {
         return _padding_forge(pt, ct, classic_detector, blk_size).await;
-    } 
+    }
     Err(DecryptError::CouldNotDecryptClassic(
         "No padding oracle found".into(),
     ))
@@ -57,8 +60,8 @@ async fn _padding_forge<D: Detector + Send + Sync + 'static>(
         .map(|val| Vec::from(val))
         .collect();
     // trim ciphertext if longer
-    if ciphertext_blocks.len() > blocks.len() + 1{
-        ciphertext_blocks = ciphertext_blocks[..blocks.len()+1].to_vec();
+    if ciphertext_blocks.len() > blocks.len() + 1 {
+        ciphertext_blocks = ciphertext_blocks[..blocks.len() + 1].to_vec();
     }
     // add to ciphertext if shorter
     while ciphertext_blocks.len() < blocks.len() + 1 {
