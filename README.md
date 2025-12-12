@@ -21,9 +21,12 @@ application, but the padding is still checked by the decryptor. This is what ena
 Additionally, it may be possible to perform an intermediate ciphertext attack where a section of data allows  
 some random bytes, and error messages are tied with the presence of a certain character. An example would  
 be a plaintext JSON object string attribute `{"foo":"couple blocks of string content here"}`  
+
 If the JSON object allows random bytes in the string then an attack might look like this:  
 `{"foo":"[RANDOM_BYTES]couple [X]locks of string content here"}`  
-The attacker iterates over the last byte of the iv until it writes a `"` character at the `[X]` position.  
+
+The attacker iterates over the last byte of the iv until it writes a `"` character at the `[X]` position. 
+
 The resulting plaintext is invalid json and throws an error, which tells the attacker they've just written  
 a quotation mark. This can be used to perform a padding oracle attack since the attacker knows they've  
 written a certain byte to a certain position. Note that no padding was actually used in this attack,  
