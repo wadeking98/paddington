@@ -4,12 +4,15 @@
 Long believed to be an archaic exploit that doesn't show up on much aside from the occasional CTF,  
 The general sentiment around padding oracles is that they might be interesting, but a tester is not likely to  
 run into them in the wild.  
+
 This is mainly due to the fact that traditional padding oracles rely on there being two different error  
 messages, a padding error and a data error. And most developers these days know better than to disclose a  
 padding error.  
+
 However, it turns out that a padding error is not needed most of the time. If you can find or create a section  
 at the end of the ciphertext where it is impossible to generate a data error, then any error resulting from  
 manipulating that region of the ciphertext must be padding error!  
+
 This is called a "double ciphertext attack" and it is very simple to execute, just take a copy of the  
 ciphertext and append it to the origional text. Many applications will stop reading the data after they've  
 gotten all the information they need, this means that the second copy of the ciphertext is unchecked by the  
