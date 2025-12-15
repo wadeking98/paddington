@@ -1,13 +1,19 @@
-use std::{collections::HashMap, io::{self, Write}, string::FromUtf8Error, sync::Arc, time::Duration};
+use std::{
+    cmp::min, collections::HashMap, io::{self, Write}, string::FromUtf8Error, sync::Arc, time::Duration
+};
 
 use async_trait::async_trait;
 use base64::prelude::*;
 use clap::{Parser, ValueEnum, arg, command};
 use colored::Colorize;
 use regex::{Regex, RegexBuilder};
-use serde_json::{Value};
+use serde_json::Value;
 use strum_macros::Display;
-use tokio::{spawn, sync::{Mutex, mpsc}, time::sleep};
+use tokio::{
+    spawn,
+    sync::{Mutex, mpsc},
+    time::sleep,
+};
 use urlencoding::{decode, encode};
 
 use crate::{
@@ -155,7 +161,8 @@ struct HTTPOracle {
 #[async_trait]
 impl Oracle for HTTPOracle {
     async fn exec(&self, ct: &[u8]) -> String {
-        let modified_ct = encode_ct(ct, self.encoding.clone()).expect("Invalid utf-8 string after encoding");
+        let modified_ct =
+            encode_ct(ct, self.encoding.clone()).expect("Invalid utf-8 string after encoding");
         let injection_point = String::from("@{INJECT_HERE}@");
         // insert into headers
         let mut headers = vec![];
@@ -234,7 +241,7 @@ impl Oracle for HTTPOracle {
     }
 }
 
-fn encode_ct(ct: &[u8], encoding: Vec<Encoding>) -> Result<String, FromUtf8Error>{
+fn encode_ct(ct: &[u8], encoding: Vec<Encoding>) -> Result<String, FromUtf8Error> {
     let mut res = Vec::from(ct);
     // encode bytes
     for enc in encoding.clone().iter().rev() {
@@ -242,11 +249,11 @@ fn encode_ct(ct: &[u8], encoding: Vec<Encoding>) -> Result<String, FromUtf8Error
             Encoding::HEX => hex::encode(res).as_bytes().to_vec(),
             Encoding::B64 => BASE64_STANDARD.encode(res).as_bytes().to_vec(),
             Encoding::B64Url => BASE64_URL_SAFE.encode(res).as_bytes().to_vec(),
-            Encoding::URL => encode(
-                &String::from_utf8(res).expect("Error: invalid string when url encoding"),
-            )
-            .as_bytes()
-            .to_vec(),
+            Encoding::URL => {
+                encode(&String::from_utf8(res).expect("Error: invalid string when url encoding"))
+                    .as_bytes()
+                    .to_vec()
+            }
         };
     }
     return String::from_utf8(res);
@@ -421,8 +428,6 @@ async fn main() {
     config.set("blk_size".to_string(), block_size.to_string());
     config.set("threads".to_string(), args.threads.to_string());
 
-
-
     let mut headers: Vec<(String, String)> = vec![];
     for header in args.headers {
         let header_parts = header.split(':').map(String::from).collect::<Vec<String>>();
@@ -472,90 +477,116 @@ async fn main() {
             String::from("\nTesting double padding oracle"),
         ));
     }
-    
+
     // find ct_len for the progress bar
     let mut ct_len = oracles[0].1.len() - block_size;
-    if let Some(ref ct_override) = args.ciphertext{
+    if let Some(ref ct_override) = args.ciphertext {
         ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len();
     }
-    if let Some(ref pt) = args.forge{
-        ct_len = ((pt.len()/block_size) + 1)*block_size;
+    if let Some(ref pt) = args.forge {
+        ct_len = ((pt.len() / block_size) + 1) * block_size;
     }
-    let (tx,mut rx) = mpsc::channel::<Messages>(255);
-    
-    spawn(async move{
+    let (tx, mut rx) = mpsc::channel::<Messages>(255);
+
+    // this section here is just to print the progress bar
+    spawn(async move {
         let curr_results: Vec<u8> = vec![b'-'; ct_len];
         let curr_results_modified: Vec<bool> = vec![false; ct_len];
-        let loading_map = HashMap::from([(b'|',b'/'), (b'/',b'-'), (b'-', b'\\'), (b'\\', b'|')]);
+        let loading_map = HashMap::from([(b'|', b'/'), (b'/', b'-'), (b'-', b'\\'), (b'\\', b'|')]);
         let curr_results_shared = Arc::new(Mutex::new(curr_results));
-        let curr_results_modified_shared= Arc::new(Mutex::new(curr_results_modified));
+        let curr_results_modified_shared = Arc::new(Mutex::new(curr_results_modified));
         let curr_results_shared_copy = curr_results_shared.clone();
         let curr_results_modified_shared_copy = curr_results_modified_shared.clone();
-        spawn( async move{
-            loop{
+        spawn(async move {
+            loop {
                 let msg = rx.recv().await;
-                if let Some(msg) = msg{
+                if let Some(msg) = msg {
                     // println!("here");
                     match msg {
                         Messages::ByteFound(byte, pos) => {
                             let mut curr_results = curr_results_shared.lock().await;
-                            let mut curr_results_modified = curr_results_modified_shared.lock().await;
+                            let mut curr_results_modified =
+                                curr_results_modified_shared.lock().await;
                             curr_results[pos] = byte;
                             curr_results_modified[pos] = true;
-                            let byte_string = fmt_bytes_custom(&curr_results);
-                            print!("\r{}", byte_string);
-                            io::stdout().flush().unwrap();
-                        },
-                        Messages::OracleConfirmed =>{
+                        }
+                        Messages::OracleConfirmed => {
                             print!("\r\x1B[2K");
                             io::stdout().flush().unwrap();
                             println!("{}", "Padding Oracle Confirmed!".green());
                         }
-                        _ =>  ()
+                        _ => (),
                     };
                 }
             }
         });
-        spawn(async move{
-            loop{
+        spawn(async move {
+            let truncate_len = 32;
+            loop {
                 sleep(Duration::from_millis(250)).await;
                 let mut curr_results = curr_results_shared_copy.lock().await;
                 let curr_results_modified = curr_results_modified_shared_copy.lock().await;
-                for i in 0..curr_results.len(){
+                // update loop
+                for i in 0..curr_results.len() {
                     //skip results that have been modified
-                    if curr_results_modified[i]{
+                    if curr_results_modified[i] {
                         continue;
                     }
                     curr_results[i] = *loading_map.get(&curr_results[i]).unwrap_or(&b'-');
-                    let byte_string = fmt_bytes_custom(&curr_results);
-                    print!("\r{}", byte_string);
-                    io::stdout().flush().unwrap();
                 }
+                let working_chunk = curr_results_modified
+                    .chunks(truncate_len)
+                    .position(|c| c.contains(&false) && c.contains(&true))
+                    .unwrap_or(0);
+
+                let end = min((working_chunk+1) * truncate_len, curr_results.len());
+                let curr_results_slice = &curr_results
+                    [working_chunk * truncate_len..end];
+                let byte_string = fmt_bytes_custom(&curr_results_slice);
+                print!("\r\x1B[2K");
+                io::stdout().flush().unwrap();
+                print!("{}", byte_string);
+                if ct_len > truncate_len {
+                    print!("...");
+                }
+                
+                io::stdout().flush().unwrap();
             }
         });
     });
 
+    // this section runs the padding oracle attack
     for (oracle, base_ct, log) in oracles {
         println!("\n{}", log);
         let mut ct = base_ct.clone();
         if let Some(override_ct) = args.ciphertext.clone() {
             ct = decode_ct(override_ct, encoding.clone());
-            if let Some(iv) = args.iv.clone(){
+            if let Some(iv) = args.iv.clone() {
                 let iv = decode_ct(iv, encoding.clone());
                 ct = iv.iter().chain(ct.iter()).cloned().collect();
             }
         }
         if let Some(forge_string) = args.forge.clone() {
-            let result =
-                padding_oracle_forge(forge_string.as_bytes(), &ct.clone(), oracle, tx.clone(), config.clone())
-                    .await;
+            let result = padding_oracle_forge(
+                forge_string.as_bytes(),
+                &ct.clone(),
+                oracle,
+                tx.clone(),
+                config.clone(),
+            )
+            .await;
             if let Ok(ct) = result {
-                println!("\nforged ciphertext: {}", encode_ct(&ct, encoding).expect("Error: forged ciphertext cannot be displayed as utf-8"));
+                println!(
+                    "\nforged ciphertext: {}",
+                    encode_ct(&ct, encoding)
+                        .expect("Error: forged ciphertext cannot be displayed as utf-8")
+                );
                 return;
             }
         } else {
             let res = padding_oracle_decrypt(&ct.clone(), oracle, tx.clone(), config.clone()).await;
-            if res.is_ok(){
+            if let Ok(res) = res {
+                println!("\nplaintext: {}", fmt_bytes_custom(&res));
                 return;
             }
         }

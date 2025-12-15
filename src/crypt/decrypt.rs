@@ -3,11 +3,15 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use tokio::{sync::{Mutex, mpsc::{Sender}}, task::JoinSet};
+use tokio::{
+    sync::{Mutex, mpsc::Sender},
+    task::JoinSet,
+};
 
 use crate::{
     crypt::{
-        MessageForwarder, calc_intermediate_vector, detector::{Detector, Oracle, SimpleDetector}
+        MessageForwarder, calc_intermediate_vector,
+        detector::{Detector, Oracle, SimpleDetector},
     },
     errors::DecryptError,
     helper::{Config, Messages},
@@ -69,19 +73,25 @@ async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
             let orig_first_block_copy = orig_first_block.clone();
             current_blocks[0] = vec![0u8; blk_size as usize];
 
-            let msg_forwarder = MessageForwarder::new(tx, Box::new(move |msg|{
-                match msg {
+            let msg_forwarder = MessageForwarder::new(
+                tx,
+                Box::new(move |msg| match msg {
                     Messages::ByteFound(zero_byte, pos) => {
                         let byte = zero_byte ^ orig_first_block_copy[pos];
-                        return Messages::ByteFound(byte, block_index*blk_size + pos)
-                    },
-                    other => other
-                }
-            }));
+                        return Messages::ByteFound(byte, block_index * blk_size + pos);
+                    }
+                    other => other,
+                }),
+            );
 
-            let intermediate_vector =
-                calc_intermediate_vector(&current_blocks[0], &current_blocks[1], detector, msg_forwarder.local_tx.clone()).await;
-            
+            let intermediate_vector = calc_intermediate_vector(
+                &current_blocks[0],
+                &current_blocks[1],
+                detector,
+                msg_forwarder.local_tx.clone(),
+            )
+            .await;
+
             if intermediate_vector.is_err() {
                 decrypt_error.fetch_or(true, Ordering::SeqCst);
                 return;

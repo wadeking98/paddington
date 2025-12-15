@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 #[derive(Debug)]
-pub enum Messages{
+pub enum Messages {
     OracleConfirmed,
     ByteFound(u8, usize),
-    AttackComplete
+    AttackComplete,
 }
 
 #[derive(Clone)]

@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use tokio::{ sync::mpsc::{Sender}};
+use tokio::sync::mpsc::Sender;
 
 use crate::{
     crypt::{
-        MessageForwarder, calc_intermediate_vector, detector::{Detector, Oracle, SimpleDetector}
+        MessageForwarder, calc_intermediate_vector,
+        detector::{Detector, Oracle, SimpleDetector},
     },
     errors::DecryptError,
     helper::{Config, Messages},
@@ -22,7 +23,7 @@ pub async fn padding_oracle_forge<O: Oracle>(
     // classic padding oracle
     if let Ok(classic_detector) = SimpleDetector::init(ct, oracle, blk_size, threads).await {
         let _ = tx.send(Messages::OracleConfirmed).await;
-        return _padding_forge(pt, ct, classic_detector, tx,  blk_size).await;
+        return _padding_forge(pt, ct, classic_detector, tx, blk_size).await;
     }
     Err(DecryptError::CouldNotDecryptClassic(
         "No padding oracle found".into(),
@@ -82,18 +83,24 @@ async fn _padding_forge<D: Detector + Send + Sync + 'static>(
 
         let tx = tx.clone();
 
-        let msg_forwarder = MessageForwarder::new(tx, Box::new(move |msg|{
-            match msg {
+        let msg_forwarder = MessageForwarder::new(
+            tx,
+            Box::new(move |msg| match msg {
                 Messages::ByteFound(zero_byte, pos) => {
                     let byte = zero_byte ^ orig_first_block_copy[pos];
-                    return Messages::ByteFound(byte, block_index*blk_size + pos)
-                },
-                other => other
-            }
-        }));
+                    return Messages::ByteFound(byte, block_index * blk_size + pos);
+                }
+                other => other,
+            }),
+        );
 
-        let intermediate_vector =
-            calc_intermediate_vector(&current_blocks[0], &current_blocks[1], detector, msg_forwarder.local_tx.clone()).await?;
+        let intermediate_vector = calc_intermediate_vector(
+            &current_blocks[0],
+            &current_blocks[1],
+            detector,
+            msg_forwarder.local_tx.clone(),
+        )
+        .await?;
         let ciphertext_block: Vec<u8> = blocks[block_index]
             .iter()
             .zip(intermediate_vector.iter())

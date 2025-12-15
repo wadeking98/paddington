@@ -3,34 +3,42 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use tokio::{spawn, sync::{Mutex, mpsc::{self, Sender}}, task::{JoinHandle, JoinSet}};
+use tokio::{
+    spawn,
+    sync::{
+        Mutex,
+        mpsc::{self, Sender},
+    },
+    task::{JoinHandle, JoinSet},
+};
 
 use crate::{
     crypt::detector::{DETECT, Detector},
-    errors::DecryptError, helper::Messages,
+    errors::DecryptError,
+    helper::Messages,
 };
 
 pub mod decrypt;
 pub mod detector;
 pub mod forge;
 
-struct MessageForwarder{
+struct MessageForwarder {
     join_handle: JoinHandle<()>,
-    local_tx: Sender<Messages>
+    local_tx: Sender<Messages>,
 }
 
-impl Drop for MessageForwarder{
+impl Drop for MessageForwarder {
     fn drop(&mut self) {
         self.join_handle.abort();
     }
 }
 
-impl MessageForwarder{
-    fn new(tx: Sender<Messages>, msg_op: Box<dyn Fn(Messages) -> Messages + Send>) -> Self{
+impl MessageForwarder {
+    fn new(tx: Sender<Messages>, msg_op: Box<dyn Fn(Messages) -> Messages + Send>) -> Self {
         let (local_tx, mut local_rx) = mpsc::channel::<Messages>(255);
-        let join_handle = spawn(async move{
-            loop{
-                match local_rx.recv().await{
+        let join_handle = spawn(async move {
+            loop {
+                match local_rx.recv().await {
                     None => break,
                     Some(msg) => {
                         let _ = tx.send(msg_op(msg)).await;
@@ -38,16 +46,18 @@ impl MessageForwarder{
                 }
             }
         });
-        Self{join_handle, local_tx}
+        Self {
+            join_handle,
+            local_tx,
+        }
     }
 }
-
 
 async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
     iv: &[u8],
     ct_block: &[u8],
     detector: Arc<D>,
-    tx: Sender<Messages>
+    tx: Sender<Messages>,
 ) -> Result<Vec<u8>, DecryptError> {
     let mut iv = Vec::from(iv);
     let blk_size = iv.len();
@@ -87,7 +97,7 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
                             let zero_byte = j ^ curr_padding;
                             let _ = tx.send(Messages::ByteFound(zero_byte, i)).await;
                             intermediate_vector[i as usize] = zero_byte;
-                            if changed_byte{
+                            if changed_byte {
                                 // we want to prioritize valid paddings where a byte was changed, since if the byte wasn't changed
                                 // then the tool might think it's written a padding of \x01 when really if wrote \x02 and the plaintext just happened to end with \x02\x02
                                 canceled.fetch_or(true, Ordering::SeqCst);
