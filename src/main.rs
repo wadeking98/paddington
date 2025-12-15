@@ -1,14 +1,18 @@
+use std::{collections::HashMap, io::{self, Write}, string::FromUtf8Error, sync::Arc, time::Duration};
+
 use async_trait::async_trait;
 use base64::prelude::*;
 use clap::{Parser, ValueEnum, arg, command};
+use colored::Colorize;
 use regex::{Regex, RegexBuilder};
-use serde_json::{Result, Value};
+use serde_json::{Value};
 use strum_macros::Display;
+use tokio::{spawn, sync::{Mutex, mpsc}, time::sleep};
 use urlencoding::{decode, encode};
 
 use crate::{
     crypt::{decrypt::padding_oracle_decrypt, detector::Oracle, forge::padding_oracle_forge},
-    helper::Config,
+    helper::{Config, Messages},
 };
 use reqwest::{Client, Method, Proxy};
 
@@ -89,6 +93,10 @@ struct Args {
     #[arg(short, long)]
     ciphertext: Option<String>,
 
+    ///add a prefix to the ciphertext (IV) encoded the same way as the ciphertext
+    #[arg(short, long)]
+    iv: Option<String>,
+
     #[arg(short, long, ignore_case = true, default_value_t = Attack::ALL, help = "the attack type to use, (single = standard attack) (double = double ciphertext attack) \n(inter = intermediate ciphertext attack, not implemented yet)")]
     attack: Attack,
 }
@@ -147,22 +155,8 @@ struct HTTPOracle {
 #[async_trait]
 impl Oracle for HTTPOracle {
     async fn exec(&self, ct: &[u8]) -> String {
-        let mut res = Vec::from(ct);
+        let modified_ct = encode_ct(ct, self.encoding.clone()).expect("Invalid utf-8 string after encoding");
         let injection_point = String::from("@{INJECT_HERE}@");
-        // encode bytes
-        for enc in self.encoding.clone().iter().rev() {
-            res = match enc {
-                Encoding::HEX => hex::encode(res).as_bytes().to_vec(),
-                Encoding::B64 => BASE64_STANDARD.encode(res).as_bytes().to_vec(),
-                Encoding::B64Url => BASE64_URL_SAFE.encode(res).as_bytes().to_vec(),
-                Encoding::URL => encode(
-                    &String::from_utf8(res).expect("Error: invalid string when url encoding"),
-                )
-                .as_bytes()
-                .to_vec(),
-            };
-        }
-        let modified_ct = String::from_utf8(res).expect("Invalid utf-8 string after encoding");
         // insert into headers
         let mut headers = vec![];
         for mut header in self.headers.clone() {
@@ -179,7 +173,7 @@ impl Oracle for HTTPOracle {
         // insert into url
         let url = self.url.replace(&injection_point, &modified_ct);
 
-        let mut client_builder = Client::builder();
+        let mut client_builder = Client::builder().http1_title_case_headers();
 
         //add proxy
         if let Some(p) = &self.proxy {
@@ -240,6 +234,48 @@ impl Oracle for HTTPOracle {
     }
 }
 
+fn encode_ct(ct: &[u8], encoding: Vec<Encoding>) -> Result<String, FromUtf8Error>{
+    let mut res = Vec::from(ct);
+    // encode bytes
+    for enc in encoding.clone().iter().rev() {
+        res = match enc {
+            Encoding::HEX => hex::encode(res).as_bytes().to_vec(),
+            Encoding::B64 => BASE64_STANDARD.encode(res).as_bytes().to_vec(),
+            Encoding::B64Url => BASE64_URL_SAFE.encode(res).as_bytes().to_vec(),
+            Encoding::URL => encode(
+                &String::from_utf8(res).expect("Error: invalid string when url encoding"),
+            )
+            .as_bytes()
+            .to_vec(),
+        };
+    }
+    return String::from_utf8(res);
+}
+
+fn decode_ct(ct: String, encoding: Vec<Encoding>) -> Vec<u8> {
+    // decode bytes
+    let mut res = Vec::from(ct.as_bytes());
+    for enc in encoding {
+        res = match enc {
+            Encoding::HEX => hex::decode(String::from_utf8(res).expect("Error: invalid string"))
+                .expect("Error: invalid hex string"),
+            Encoding::B64 => BASE64_STANDARD
+                .decode(String::from_utf8(res).expect("Error: invalid string"))
+                .expect("Error: invalid b64 string"),
+            Encoding::B64Url => BASE64_URL_SAFE
+                .decode(String::from_utf8(res).expect("Error: invalid string"))
+                .expect("Error: invalid b64 url string"),
+            Encoding::URL => {
+                decode(&String::from_utf8(res).expect("Error: invalid string when url decoding"))
+                    .expect("Error: invalid encoded url string")
+                    .as_bytes()
+                    .to_vec()
+            }
+        };
+    }
+    return res;
+}
+
 fn search_json_obj(
     val: &mut Value,
     search_key: String,
@@ -287,7 +323,7 @@ fn set_injection_points(oracle: &mut HTTPOracle) -> Option<String> {
 
         if let Some(ref mut body_data) = oracle.data {
             //parse from json data
-            let json_data_res: Result<Value> = serde_json::from_str(&body_data.clone());
+            let json_data_res = serde_json::from_str(&body_data.clone());
             if let Ok(mut json_data) = json_data_res {
                 if let Some(success_res) =
                     search_json_obj(&mut json_data, p.clone(), Some(injection_point.clone()))
@@ -311,30 +347,6 @@ fn set_injection_points(oracle: &mut HTTPOracle) -> Option<String> {
         }
     }
     return found_ct;
-}
-
-fn decode_ct(ct: String, encoding: Vec<Encoding>) -> Vec<u8> {
-    // decode bytes
-    let mut res = Vec::from(ct.as_bytes());
-    for enc in encoding {
-        res = match enc {
-            Encoding::HEX => hex::decode(String::from_utf8(res).expect("Error: invalid string"))
-                .expect("Error: invalid hex string"),
-            Encoding::B64 => BASE64_STANDARD
-                .decode(String::from_utf8(res).expect("Error: invalid string"))
-                .expect("Error: invalid b64 string"),
-            Encoding::B64Url => BASE64_URL_SAFE
-                .decode(String::from_utf8(res).expect("Error: invalid string"))
-                .expect("Error: invalid b64 url string"),
-            Encoding::URL => {
-                decode(&String::from_utf8(res).expect("Error: invalid string when url decoding"))
-                    .expect("Error: invalid encoded url string")
-                    .as_bytes()
-                    .to_vec()
-            }
-        };
-    }
-    return res;
 }
 
 impl HTTPOracle {
@@ -378,17 +390,18 @@ impl HTTPOracle {
     }
 }
 
-fn print_bytes_custom(bytes: &[u8]) {
+fn fmt_bytes_custom(bytes: &[u8]) -> String {
+    let mut base = String::new();
     for &byte in bytes {
         if byte.is_ascii_graphic() {
             // Cast to char for printing as a character
-            print!("{}", byte as char);
+            base += format!("{}", byte as char).as_str();
         } else {
             // Print as a two-digit uppercase hex value with "0x" prefix
-            print!("\\x{:02X}", byte);
+            base += format!("\\x{:02X}", byte).as_str();
         }
     }
-    println!(); // Add a newline at the end
+    base
 }
 
 #[tokio::main]
@@ -407,6 +420,8 @@ async fn main() {
     };
     config.set("blk_size".to_string(), block_size.to_string());
     config.set("threads".to_string(), args.threads.to_string());
+
+
 
     let mut headers: Vec<(String, String)> = vec![];
     for header in args.headers {
@@ -457,25 +472,90 @@ async fn main() {
             String::from("\nTesting double padding oracle"),
         ));
     }
+    
+    // find ct_len for the progress bar
+    let mut ct_len = oracles[0].1.len() - block_size;
+    if let Some(ref ct_override) = args.ciphertext{
+        ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len();
+    }
+    if let Some(ref pt) = args.forge{
+        ct_len = ((pt.len()/block_size) + 1)*block_size;
+    }
+    let (tx,mut rx) = mpsc::channel::<Messages>(255);
+    
+    spawn(async move{
+        let curr_results: Vec<u8> = vec![b'-'; ct_len];
+        let curr_results_modified: Vec<bool> = vec![false; ct_len];
+        let loading_map = HashMap::from([(b'|',b'/'), (b'/',b'-'), (b'-', b'\\'), (b'\\', b'|')]);
+        let curr_results_shared = Arc::new(Mutex::new(curr_results));
+        let curr_results_modified_shared= Arc::new(Mutex::new(curr_results_modified));
+        let curr_results_shared_copy = curr_results_shared.clone();
+        let curr_results_modified_shared_copy = curr_results_modified_shared.clone();
+        spawn( async move{
+            loop{
+                let msg = rx.recv().await;
+                if let Some(msg) = msg{
+                    // println!("here");
+                    match msg {
+                        Messages::ByteFound(byte, pos) => {
+                            let mut curr_results = curr_results_shared.lock().await;
+                            let mut curr_results_modified = curr_results_modified_shared.lock().await;
+                            curr_results[pos] = byte;
+                            curr_results_modified[pos] = true;
+                            let byte_string = fmt_bytes_custom(&curr_results);
+                            print!("\r{}", byte_string);
+                            io::stdout().flush().unwrap();
+                        },
+                        Messages::OracleConfirmed =>{
+                            print!("\r\x1B[2K");
+                            io::stdout().flush().unwrap();
+                            println!("{}", "Padding Oracle Confirmed!".green());
+                        }
+                        _ =>  ()
+                    };
+                }
+            }
+        });
+        spawn(async move{
+            loop{
+                sleep(Duration::from_millis(250)).await;
+                let mut curr_results = curr_results_shared_copy.lock().await;
+                let curr_results_modified = curr_results_modified_shared_copy.lock().await;
+                for i in 0..curr_results.len(){
+                    //skip results that have been modified
+                    if curr_results_modified[i]{
+                        continue;
+                    }
+                    curr_results[i] = *loading_map.get(&curr_results[i]).unwrap_or(&b'-');
+                    let byte_string = fmt_bytes_custom(&curr_results);
+                    print!("\r{}", byte_string);
+                    io::stdout().flush().unwrap();
+                }
+            }
+        });
+    });
 
     for (oracle, base_ct, log) in oracles {
-        println!("{}", log);
+        println!("\n{}", log);
         let mut ct = base_ct.clone();
         if let Some(override_ct) = args.ciphertext.clone() {
-            ct = decode_ct(override_ct, encoding.clone())
+            ct = decode_ct(override_ct, encoding.clone());
+            if let Some(iv) = args.iv.clone(){
+                let iv = decode_ct(iv, encoding.clone());
+                ct = iv.iter().chain(ct.iter()).cloned().collect();
+            }
         }
         if let Some(forge_string) = args.forge.clone() {
             let result =
-                padding_oracle_forge(forge_string.as_bytes(), &ct.clone(), oracle, config.clone())
+                padding_oracle_forge(forge_string.as_bytes(), &ct.clone(), oracle, tx.clone(), config.clone())
                     .await;
             if let Ok(ct) = result {
-                println!("forged ciphertext: {}", hex::encode(ct));
+                println!("\nforged ciphertext: {}", encode_ct(&ct, encoding).expect("Error: forged ciphertext cannot be displayed as utf-8"));
                 return;
             }
         } else {
-            let result = padding_oracle_decrypt(&ct.clone(), oracle, config.clone()).await;
-            if let Ok(pt) = result {
-                print_bytes_custom(&pt);
+            let res = padding_oracle_decrypt(&ct.clone(), oracle, tx.clone(), config.clone()).await;
+            if res.is_ok(){
                 return;
             }
         }

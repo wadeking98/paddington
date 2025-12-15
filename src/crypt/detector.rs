@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use colored::Colorize;
 use tokio::{
     sync::{Mutex, Semaphore},
     task::JoinSet,
@@ -110,12 +109,10 @@ impl Detector for SimpleDetector {
         futures_set.join_all().await;
         let response_map_acquired = response_map_shared.lock().await;
         if response_map_acquired.keys().len() < 2 {
-            println!("{}", "No padding oracle found".red());
             return Err(DecryptError::DifferentialResponses(
                 "No unique responses found".into(),
             ));
         }
-        println!("{}", "Padding oracle detected! Starting attack".green());
         let (padding_invalid_resp, _) = response_map_acquired
             .iter()
             .max_by_key(|(_k, v)| *v)

@@ -1,25 +1,28 @@
 use std::sync::Arc;
 
+use tokio::{ sync::mpsc::{Sender}};
+
 use crate::{
     crypt::{
-        calc_intermediate_vector,
-        detector::{Detector, Oracle, SimpleDetector},
+        MessageForwarder, calc_intermediate_vector, detector::{Detector, Oracle, SimpleDetector}
     },
     errors::DecryptError,
-    helper::Config,
+    helper::{Config, Messages},
 };
 
 pub async fn padding_oracle_forge<O: Oracle>(
     pt: &[u8],
     ct: &[u8],
     oracle: O,
+    tx: Sender<Messages>,
     config: Config,
 ) -> Result<Vec<u8>, DecryptError> {
     let blk_size = config.get_int("blk_size".to_owned(), 16) as usize;
     let threads = config.get_int("threads".to_owned(), 10) as usize;
     // classic padding oracle
     if let Ok(classic_detector) = SimpleDetector::init(ct, oracle, blk_size, threads).await {
-        return _padding_forge(pt, ct, classic_detector, blk_size).await;
+        let _ = tx.send(Messages::OracleConfirmed).await;
+        return _padding_forge(pt, ct, classic_detector, tx,  blk_size).await;
     }
     Err(DecryptError::CouldNotDecryptClassic(
         "No padding oracle found".into(),
@@ -31,6 +34,7 @@ async fn _padding_forge<D: Detector + Send + Sync + 'static>(
     pt: &[u8],
     ct: &[u8],
     detector: D,
+    tx: Sender<Messages>,
     blk_size: usize,
 ) -> Result<Vec<u8>, DecryptError> {
     if pt.len() <= 0 {
@@ -73,10 +77,23 @@ async fn _padding_forge<D: Detector + Send + Sync + 'static>(
         let detector = detector_shared.clone();
         //get next two blocks
         let mut current_blocks = Vec::from(&ciphertext_blocks[block_index..block_index + 2]);
+        let orig_first_block_copy = blocks[block_index].clone();
         current_blocks[0] = vec![0u8; blk_size as usize];
 
+        let tx = tx.clone();
+
+        let msg_forwarder = MessageForwarder::new(tx, Box::new(move |msg|{
+            match msg {
+                Messages::ByteFound(zero_byte, pos) => {
+                    let byte = zero_byte ^ orig_first_block_copy[pos];
+                    return Messages::ByteFound(byte, block_index*blk_size + pos)
+                },
+                other => other
+            }
+        }));
+
         let intermediate_vector =
-            calc_intermediate_vector(&current_blocks[0], &current_blocks[1], detector).await?;
+            calc_intermediate_vector(&current_blocks[0], &current_blocks[1], detector, msg_forwarder.local_tx.clone()).await?;
         let ciphertext_block: Vec<u8> = blocks[block_index]
             .iter()
             .zip(intermediate_vector.iter())

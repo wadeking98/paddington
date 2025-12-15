@@ -1,5 +1,12 @@
 use std::collections::HashMap;
 
+#[derive(Debug)]
+pub enum Messages{
+    OracleConfirmed,
+    ByteFound(u8, usize),
+    AttackComplete
+}
+
 #[derive(Clone)]
 pub struct Config(HashMap<String, String>);
 
