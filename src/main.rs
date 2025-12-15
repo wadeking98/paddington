@@ -1,26 +1,25 @@
-use std::{
-    cmp::min, collections::HashMap, io::{self, Write}, string::FromUtf8Error, sync::Arc, time::Duration
-};
+use std::string::FromUtf8Error;
 
 use async_trait::async_trait;
 use base64::prelude::*;
 use clap::{Parser, ValueEnum, arg, command};
-use colored::Colorize;
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 use strum_macros::Display;
-use tokio::{
-    spawn,
-    sync::{Mutex, mpsc},
-    time::sleep,
-};
+use tokio::sync::mpsc;
 use urlencoding::{decode, encode};
 
 use crate::{
     crypt::{decrypt::padding_oracle_decrypt, detector::Oracle, forge::padding_oracle_forge},
     helper::{Config, Messages},
+    print::{fmt_bytes_custom, progress_bar},
 };
 use reqwest::{Client, Method, Proxy};
+
+pub mod crypt;
+pub mod errors;
+pub mod helper;
+pub mod print;
 
 #[derive(Display, Debug, Clone, ValueEnum)]
 enum Encoding {
@@ -106,10 +105,6 @@ struct Args {
     #[arg(short, long, ignore_case = true, default_value_t = Attack::ALL, help = "the attack type to use, (single = standard attack) (double = double ciphertext attack) \n(inter = intermediate ciphertext attack, not implemented yet)")]
     attack: Attack,
 }
-
-pub mod crypt;
-pub mod errors;
-pub mod helper;
 
 struct HTTPDoubleOracle {
     single_oracle: HTTPOracle,
@@ -397,20 +392,6 @@ impl HTTPOracle {
     }
 }
 
-fn fmt_bytes_custom(bytes: &[u8]) -> String {
-    let mut base = String::new();
-    for &byte in bytes {
-        if byte.is_ascii_graphic() {
-            // Cast to char for printing as a character
-            base += format!("{}", byte as char).as_str();
-        } else {
-            // Print as a two-digit uppercase hex value with "0x" prefix
-            base += format!("\\x{:02X}", byte).as_str();
-        }
-    }
-    base
-}
-
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -481,79 +462,15 @@ async fn main() {
     // find ct_len for the progress bar
     let mut ct_len = oracles[0].1.len() - block_size;
     if let Some(ref ct_override) = args.ciphertext {
-        ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len();
+        ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len() - block_size;
     }
     if let Some(ref pt) = args.forge {
         ct_len = ((pt.len() / block_size) + 1) * block_size;
     }
-    let (tx, mut rx) = mpsc::channel::<Messages>(255);
+    let (tx, rx) = mpsc::channel::<Messages>(255);
 
     // this section here is just to print the progress bar
-    spawn(async move {
-        let curr_results: Vec<u8> = vec![b'-'; ct_len];
-        let curr_results_modified: Vec<bool> = vec![false; ct_len];
-        let loading_map = HashMap::from([(b'|', b'/'), (b'/', b'-'), (b'-', b'\\'), (b'\\', b'|')]);
-        let curr_results_shared = Arc::new(Mutex::new(curr_results));
-        let curr_results_modified_shared = Arc::new(Mutex::new(curr_results_modified));
-        let curr_results_shared_copy = curr_results_shared.clone();
-        let curr_results_modified_shared_copy = curr_results_modified_shared.clone();
-        spawn(async move {
-            loop {
-                let msg = rx.recv().await;
-                if let Some(msg) = msg {
-                    // println!("here");
-                    match msg {
-                        Messages::ByteFound(byte, pos) => {
-                            let mut curr_results = curr_results_shared.lock().await;
-                            let mut curr_results_modified =
-                                curr_results_modified_shared.lock().await;
-                            curr_results[pos] = byte;
-                            curr_results_modified[pos] = true;
-                        }
-                        Messages::OracleConfirmed => {
-                            print!("\r\x1B[2K");
-                            io::stdout().flush().unwrap();
-                            println!("{}", "Padding Oracle Confirmed!".green());
-                        }
-                        _ => (),
-                    };
-                }
-            }
-        });
-        spawn(async move {
-            let truncate_len = 32;
-            loop {
-                sleep(Duration::from_millis(250)).await;
-                let mut curr_results = curr_results_shared_copy.lock().await;
-                let curr_results_modified = curr_results_modified_shared_copy.lock().await;
-                // update loop
-                for i in 0..curr_results.len() {
-                    //skip results that have been modified
-                    if curr_results_modified[i] {
-                        continue;
-                    }
-                    curr_results[i] = *loading_map.get(&curr_results[i]).unwrap_or(&b'-');
-                }
-                let working_chunk = curr_results_modified
-                    .chunks(truncate_len)
-                    .position(|c| c.contains(&false) && c.contains(&true))
-                    .unwrap_or(0);
-
-                let end = min((working_chunk+1) * truncate_len, curr_results.len());
-                let curr_results_slice = &curr_results
-                    [working_chunk * truncate_len..end];
-                let byte_string = fmt_bytes_custom(&curr_results_slice);
-                print!("\r\x1B[2K");
-                io::stdout().flush().unwrap();
-                print!("{}", byte_string);
-                if ct_len > truncate_len {
-                    print!("...");
-                }
-                
-                io::stdout().flush().unwrap();
-            }
-        });
-    });
+    progress_bar(ct_len, rx);
 
     // this section runs the padding oracle attack
     for (oracle, base_ct, log) in oracles {
