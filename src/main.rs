@@ -2,7 +2,7 @@ use std::string::FromUtf8Error;
 
 use async_trait::async_trait;
 use base64::prelude::*;
-use clap::{Parser, ValueEnum, arg, command};
+use clap::{Parser, ValueEnum};
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 use strum_macros::Display;
@@ -224,7 +224,6 @@ impl Oracle for HTTPOracle {
             .expect("Error: could not convert response body to text");
         response_text += &response_body;
 
-        // println!("{}", response_text);
 
         if let Some(search) = &self.search_pat {
             return match search.find(&response_text) {
@@ -316,10 +315,21 @@ fn set_injection_points(oracle: &mut HTTPOracle) -> Option<String> {
         let url = url_encoded_data::from(&temp_url);
         for query_param in url.as_pairs() {
             if p.eq(query_param.0) {
+                let mut replace_str = query_param.1.to_string();
+                // url param parser removes url encoding so we may need to add it back
+                let upper_hex_url_replace = urlencoding::encode(&replace_str).to_string();
+                let re = Regex::new(r"%([0-9a-fA-F]{2})").unwrap();
+                let lower_hex_url_replace = re.replace_all(&upper_hex_url_replace, |cap: &regex::Captures|{format!("%{}",cap[1].to_ascii_lowercase())}).to_string();
+                
+                if oracle.url.contains(&lower_hex_url_replace){
+                    replace_str = lower_hex_url_replace;
+                }else if oracle.url.contains(&upper_hex_url_replace){
+                    replace_str = upper_hex_url_replace;
+                }
                 found_ct = Some(query_param.1.to_string());
                 oracle.url = oracle
                     .url
-                    .replace(&query_param.1.to_string(), &injection_point);
+                    .replace(&replace_str, &injection_point);
             }
         }
 
@@ -461,11 +471,15 @@ async fn main() {
 
     // find ct_len for the progress bar
     let mut ct_len = oracles[0].1.len() - block_size;
-    if let Some(ref ct_override) = args.ciphertext {
-        ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len() - block_size;
-    }
     if let Some(ref pt) = args.forge {
         ct_len = ((pt.len() / block_size) + 1) * block_size;
+    }else{
+        if let Some(ref ct_override) = args.ciphertext {
+            ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len() - block_size;
+        }
+        if let Some(ref iv) = args.iv{
+            ct_len += decode_ct(iv.to_string(), encoding.clone()).len()
+        }
     }
     let (tx, rx) = mpsc::channel::<Messages>(255);
 
@@ -478,10 +492,10 @@ async fn main() {
         let mut ct = base_ct.clone();
         if let Some(override_ct) = args.ciphertext.clone() {
             ct = decode_ct(override_ct, encoding.clone());
-            if let Some(iv) = args.iv.clone() {
-                let iv = decode_ct(iv, encoding.clone());
-                ct = iv.iter().chain(ct.iter()).cloned().collect();
-            }
+        }
+        if let Some(iv) = args.iv.clone() {
+            let iv = decode_ct(iv, encoding.clone());
+            ct = iv.iter().chain(ct.iter()).cloned().collect();
         }
         if let Some(forge_string) = args.forge.clone() {
             let result = padding_oracle_forge(

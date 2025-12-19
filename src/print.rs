@@ -63,7 +63,7 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
             }
         });
         spawn(async move {
-            let truncate_len = 32;
+            let truncate_len = 64;
             loop {
                 sleep(Duration::from_millis(250)).await;
                 let mut curr_results = curr_results_shared_copy.lock().await;

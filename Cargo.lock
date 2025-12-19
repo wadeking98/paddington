@@ -785,6 +785,8 @@ dependencies = [
  "strum_macros",
  "thiserror",
  "tokio",
+ "tokio-util",
+ "url",
  "url_encoded_data",
  "urlencoding",
 ]

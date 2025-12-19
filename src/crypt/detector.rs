@@ -75,7 +75,7 @@ impl Detector for SimpleDetector {
                 "Not enough blocks for classic attack".into(),
             ));
         }
-        let last_blocks_shared = Vec::from(&blocks[blocks.len() - 2..blocks.len()]);
+        let last_blocks_shared = Vec::from([vec![0u8;blk_size],blocks[blocks.len()-1].clone()]);
 
         let response_map_shared: Arc<Mutex<HashMap<String, u16>>> =
             Arc::new(Mutex::new(HashMap::new()));

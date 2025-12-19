@@ -25,10 +25,11 @@ pub async fn padding_oracle_decrypt<O: Oracle>(
 ) -> Result<Vec<u8>, DecryptError> {
     let blk_size = config.get_int("blk_size".to_owned(), 16) as usize;
     let threads = config.get_int("threads".to_owned(), 10) as usize;
+    let retry = config.get_int("retry".to_owned(), 5) as u8;
     // classic padding oracle
     if let Ok(classic_detector) = SimpleDetector::init(ct, oracle, blk_size, threads).await {
         let _ = tx.send(Messages::OracleConfirmed).await;
-        return _padding_decrypt(ct, classic_detector, tx, blk_size).await;
+        return _padding_decrypt(ct, classic_detector,retry, tx, blk_size).await;
     }
     Err(DecryptError::CouldNotDecryptClassic(
         "No padding oracle found".into(),
@@ -38,6 +39,7 @@ pub async fn padding_oracle_decrypt<O: Oracle>(
 async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
     ct: &[u8],
     detector: D,
+    retry: u8,
     tx: Sender<Messages>,
     blk_size: usize,
 ) -> Result<Vec<u8>, DecryptError> {
@@ -88,6 +90,7 @@ async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
                 &current_blocks[0],
                 &current_blocks[1],
                 detector,
+                retry,
                 msg_forwarder.local_tx.clone(),
             )
             .await;

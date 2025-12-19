@@ -4,13 +4,12 @@ use std::sync::{
 };
 
 use tokio::{
-    spawn,
-    sync::{
+    select, spawn, sync::{
         Mutex,
         mpsc::{self, Sender},
-    },
-    task::{JoinHandle, JoinSet},
+    }, task::{JoinHandle, JoinSet}
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     crypt::detector::{DETECT, Detector},
@@ -57,6 +56,7 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
     iv: &[u8],
     ct_block: &[u8],
     detector: Arc<D>,
+    retry: u8,
     tx: Sender<Messages>,
 ) -> Result<Vec<u8>, DecryptError> {
     let mut iv = Vec::from(iv);
@@ -64,21 +64,35 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
     let intermediate_vector_shared = Arc::new(Mutex::new(vec![0u8; blk_size as usize]));
     let mut curr_padding = 1u8;
     let detector_shared = Arc::new(detector);
-    for i in (0..blk_size).rev() {
+    let mut i: i16 = blk_size as i16 - 1;
+    let mut curr_retry = retry;
+    loop{
+        // need to be able to go back and retry if we can't find a valid byte
+        if i < 0{
+            break
+        }
+        //set the padding except for the current byte we're working on: \x02, \x03\x03, \x04\x04\x04, etc
+        for k in (blk_size - (curr_padding - 1) as usize)..blk_size {
+            let zero = intermediate_vector_shared.clone().lock().await[k as usize];
+            iv[k as usize] = zero ^ curr_padding;
+        }
+
         let mut futures_set = JoinSet::new();
-        let canceled_shared = Arc::new(AtomicBool::new(false));
+        let success_shared = Arc::new(AtomicBool::new(false));
+        let cancellation_token = CancellationToken::new();
         for j in 0..=255 {
             let intermediate_vector = intermediate_vector_shared.clone();
             let mut iv_copy = iv.clone();
             let ct_block = ct_block.to_vec();
             let detector = detector_shared.clone();
-            let canceled = canceled_shared.clone();
+            let success = success_shared.clone();
             let tx = tx.clone();
+            let cancellation_token = cancellation_token.clone();
             futures_set.spawn(async move {
                 // mark if we're actually updating this byte
                 let changed_byte = iv_copy[i as usize] != j;
                 iv_copy[i as usize] = j;
-                if !canceled.load(Ordering::SeqCst)
+                if !success.load(Ordering::SeqCst)
                     && let Ok(response) = detector
                         .check(
                             &iv_copy
@@ -91,38 +105,44 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
                 {
                     // found a valid padding
                     if response == DETECT::OUTLIER {
-                        // ensures we don't write to the intermediate vector after all requests are canceled
+                        // ensures we don't write to the intermediate vector after all requests are success
                         let mut intermediate_vector = intermediate_vector.lock().await;
-                        if !canceled.load(Ordering::SeqCst) {
+                        if !success.load(Ordering::SeqCst) {
                             let zero_byte = j ^ curr_padding;
-                            let _ = tx.send(Messages::ByteFound(zero_byte, i)).await;
+                            let _ = tx.send(Messages::ByteFound(zero_byte, i as usize)).await;
                             intermediate_vector[i as usize] = zero_byte;
                             if changed_byte {
                                 // we want to prioritize valid paddings where a byte was changed, since if the byte wasn't changed
-                                // then the tool might think it's written a padding of \x01 when really if wrote \x02 and the plaintext just happened to end with \x02\x02
-                                canceled.fetch_or(true, Ordering::SeqCst);
+                                // then the tool might think it's written a padding of \x01 when really it wrote \x02 and the plaintext just happened to end with \x02\x02
+                                success.fetch_or(true, Ordering::SeqCst);
+                                cancellation_token.cancel();
                             }
                         }
                     }
                 }
             });
         }
-        futures_set.join_all().await;
-        if !canceled_shared.load(Ordering::SeqCst) {
+        select! {
+            _ = futures_set.join_all() =>{},
+            _ = cancellation_token.cancelled() =>{}
+        }
+        if !success_shared.load(Ordering::SeqCst) && curr_retry > 0 {
+            curr_retry -= 1;
+            // if not the first character
+            if i < blk_size as i16 - 1{
+                i += 1; // go back to previous character
+                curr_padding -= 1;
+            }
+            continue
+        }else if !success_shared.load(Ordering::SeqCst) {
             return Err(DecryptError::CouldNotDecryptClassic(
                 "Could not find valid padding".to_string(),
             ));
-        }
-        // if we're not on the last byte then we need to set the cipher text
-        // such that the decrypter will see a valid padding \x04\x04\x04... except
-        // for the byte that we're working on.
-        if i != 0 {
-            for k in (blk_size - curr_padding as usize - 1)..blk_size {
-                let zero = intermediate_vector_shared.clone().lock().await[k as usize];
-                iv[k as usize] = zero ^ curr_padding + 1;
-            }
+        }else{
+            curr_retry = retry;
         }
         curr_padding += 1;
+        i -= 1;
     }
     return Ok(intermediate_vector_shared.clone().lock().await.to_vec());
 }
