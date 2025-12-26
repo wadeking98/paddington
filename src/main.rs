@@ -14,7 +14,7 @@ use crate::{
     helper::{Config, Messages},
     print::{fmt_bytes_custom, progress_bar},
 };
-use reqwest::{Client, Method, Proxy};
+use reqwest::{Client, Method, Proxy, redirect::Policy};
 
 pub mod crypt;
 pub mod errors;
@@ -175,7 +175,7 @@ impl Oracle for HTTPOracle {
         // insert into url
         let url = self.url.replace(&injection_point, &modified_ct);
 
-        let mut client_builder = Client::builder().http1_title_case_headers();
+        let mut client_builder = Client::builder().redirect(Policy::none()).http1_title_case_headers();
 
         //add proxy
         if let Some(p) = &self.proxy {
