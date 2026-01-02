@@ -3,6 +3,7 @@ use std::string::FromUtf8Error;
 use async_trait::async_trait;
 use base64::prelude::*;
 use clap::{Parser, ValueEnum};
+use cookie::{Cookie, CookieJar};
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 use strum_macros::Display;
@@ -104,6 +105,10 @@ struct Args {
 
     #[arg(short, long, ignore_case = true, default_value_t = Attack::ALL, help = "the attack type to use, (single = standard attack) (double = double ciphertext attack) \n(inter = intermediate ciphertext attack, not implemented yet)")]
     attack: Attack,
+
+    ///number of times to retry when no valid byte found
+    #[arg(short, long, default_value_t = 5)]
+    retry: usize,
 }
 
 struct HTTPDoubleOracle {
@@ -175,7 +180,9 @@ impl Oracle for HTTPOracle {
         // insert into url
         let url = self.url.replace(&injection_point, &modified_ct);
 
-        let mut client_builder = Client::builder().redirect(Policy::none()).http1_title_case_headers();
+        let mut client_builder = Client::builder()
+            .redirect(Policy::none())
+            .http1_title_case_headers();
 
         //add proxy
         if let Some(p) = &self.proxy {
@@ -223,7 +230,6 @@ impl Oracle for HTTPOracle {
             .await
             .expect("Error: could not convert response body to text");
         response_text += &response_body;
-
 
         if let Some(search) = &self.search_pat {
             return match search.find(&response_text) {
@@ -310,6 +316,26 @@ fn set_injection_points(oracle: &mut HTTPOracle) -> Option<String> {
                 found_ct = Some(oracle.headers[i].1.clone());
                 oracle.headers[i].1 = injection_point.clone();
             }
+            //find cookies
+            if oracle.headers[i].0.to_ascii_lowercase().eq("cookie") {
+                let cookies = Cookie::split_parse(oracle.headers[i].1.clone());
+                let mut jar = CookieJar::new();
+                for cookie in cookies {
+                    if let Ok(cookie) = cookie {
+                        if cookie.name().eq(&p) {
+                            found_ct = Some(cookie.value().to_string());
+                            jar.add((cookie.name().to_owned(), injection_point.clone()));
+                        } else {
+                            jar.add(cookie);
+                        }
+                    }
+                }
+                oracle.headers[i].1 = jar
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<String>>()
+                    .join("; ");
+            }
         }
         let temp_url = oracle.url.clone();
         let url = url_encoded_data::from(&temp_url);
@@ -319,17 +345,19 @@ fn set_injection_points(oracle: &mut HTTPOracle) -> Option<String> {
                 // url param parser removes url encoding so we may need to add it back
                 let upper_hex_url_replace = urlencoding::encode(&replace_str).to_string();
                 let re = Regex::new(r"%([0-9a-fA-F]{2})").unwrap();
-                let lower_hex_url_replace = re.replace_all(&upper_hex_url_replace, |cap: &regex::Captures|{format!("%{}",cap[1].to_ascii_lowercase())}).to_string();
-                
-                if oracle.url.contains(&lower_hex_url_replace){
+                let lower_hex_url_replace = re
+                    .replace_all(&upper_hex_url_replace, |cap: &regex::Captures| {
+                        format!("%{}", cap[1].to_ascii_lowercase())
+                    })
+                    .to_string();
+
+                if oracle.url.contains(&lower_hex_url_replace) {
                     replace_str = lower_hex_url_replace;
-                }else if oracle.url.contains(&upper_hex_url_replace){
+                } else if oracle.url.contains(&upper_hex_url_replace) {
                     replace_str = upper_hex_url_replace;
                 }
                 found_ct = Some(query_param.1.to_string());
-                oracle.url = oracle
-                    .url
-                    .replace(&replace_str, &injection_point);
+                oracle.url = oracle.url.replace(&replace_str, &injection_point);
             }
         }
 
@@ -418,6 +446,7 @@ async fn main() {
     };
     config.set("blk_size".to_string(), block_size.to_string());
     config.set("threads".to_string(), args.threads.to_string());
+    config.set("retry".to_string(), args.retry.to_string());
 
     let mut headers: Vec<(String, String)> = vec![];
     for header in args.headers {
@@ -473,11 +502,11 @@ async fn main() {
     let mut ct_len = oracles[0].1.len() - block_size;
     if let Some(ref pt) = args.forge {
         ct_len = ((pt.len() / block_size) + 1) * block_size;
-    }else{
+    } else {
         if let Some(ref ct_override) = args.ciphertext {
             ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len() - block_size;
         }
-        if let Some(ref iv) = args.iv{
+        if let Some(ref iv) = args.iv {
             ct_len += decode_ct(iv.to_string(), encoding.clone()).len()
         }
     }

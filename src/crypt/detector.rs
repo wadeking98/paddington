@@ -75,7 +75,7 @@ impl Detector for SimpleDetector {
                 "Not enough blocks for classic attack".into(),
             ));
         }
-        let last_blocks_shared = Vec::from([vec![0u8;blk_size],blocks[blocks.len()-1].clone()]);
+        let last_blocks_shared = Vec::from([vec![0u8; blk_size], blocks[blocks.len() - 1].clone()]);
 
         let response_map_shared: Arc<Mutex<HashMap<String, u16>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -108,9 +108,13 @@ impl Detector for SimpleDetector {
         }
         futures_set.join_all().await;
         let response_map_acquired = response_map_shared.lock().await;
-        if response_map_acquired.keys().len() < 2 {
+        if response_map_acquired.keys().len() <= 1 {
             return Err(DecryptError::DifferentialResponses(
                 "No unique responses found".into(),
+            ));
+        } else if response_map_acquired.keys().len() > 3 {
+            return Err(DecryptError::DifferentialResponses(
+                "Too many unique responses found, may not be from a padding error".into(),
             ));
         }
         let (padding_invalid_resp, _) = response_map_acquired

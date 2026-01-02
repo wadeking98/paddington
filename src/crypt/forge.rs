@@ -24,7 +24,7 @@ pub async fn padding_oracle_forge<O: Oracle>(
     // classic padding oracle
     if let Ok(classic_detector) = SimpleDetector::init(ct, oracle, blk_size, threads).await {
         let _ = tx.send(Messages::OracleConfirmed).await;
-        return _padding_forge(pt, ct, classic_detector,retry, tx, blk_size).await;
+        return _padding_forge(pt, ct, classic_detector, retry, tx, blk_size).await;
     }
     Err(DecryptError::CouldNotDecryptClassic(
         "No padding oracle found".into(),
@@ -97,8 +97,8 @@ async fn _padding_forge<D: Detector + Send + Sync + 'static>(
         );
 
         let intermediate_vector = calc_intermediate_vector(
-            &current_blocks[0],
-            &current_blocks[1],
+            current_blocks[0].clone(),
+            current_blocks[1].clone(),
             detector,
             retry,
             msg_forwarder.local_tx.clone(),

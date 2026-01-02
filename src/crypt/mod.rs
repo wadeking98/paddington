@@ -1,13 +1,18 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    cmp::max,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use tokio::{
-    select, spawn, sync::{
+    select, spawn,
+    sync::{
         Mutex,
         mpsc::{self, Sender},
-    }, task::{JoinHandle, JoinSet}
+    },
+    task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -52,28 +57,57 @@ impl MessageForwarder {
     }
 }
 
+async fn loop_with_retry<T, E>(
+    retry: u8,
+    range: Vec<u8>,
+    try_func: impl AsyncFn(u8) -> Result<T, E>,
+) -> bool {
+    let mut curr_retry = retry;
+    let mut index: usize = 0;
+    let mut retry_reset: usize = 0;
+    loop {
+        // terminate loop
+        if index >= range.len() {
+            break;
+        }
+        let i = range[index];
+        let res = try_func(i).await;
+        if res.is_err() && curr_retry <= 0 {
+            return false;
+        } else if res.is_err() {
+            // decrement retry counter and go back if possible
+            curr_retry -= 1;
+            if index > 0 {
+                index -= 1;
+            }
+            retry_reset = max(retry_reset, index + 1);
+            continue;
+        } else if index >= retry_reset {
+            // reset the retry counter if we've made progress in the loop
+            curr_retry = retry;
+        }
+        index += 1;
+    }
+    return true;
+}
+
 async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
-    iv: &[u8],
-    ct_block: &[u8],
+    iv: Vec<u8>,
+    ct_block: Vec<u8>,
     detector: Arc<D>,
     retry: u8,
     tx: Sender<Messages>,
 ) -> Result<Vec<u8>, DecryptError> {
-    let mut iv = Vec::from(iv);
-    let blk_size = iv.len();
+    let blk_size = iv.len() as u8;
     let intermediate_vector_shared = Arc::new(Mutex::new(vec![0u8; blk_size as usize]));
-    let mut curr_padding = 1u8;
+    let intermediate_vector_shared_copy = intermediate_vector_shared.clone();
     let detector_shared = Arc::new(detector);
-    let mut i: i16 = blk_size as i16 - 1;
-    let mut curr_retry = retry;
-    loop{
-        // need to be able to go back and retry if we can't find a valid byte
-        if i < 0{
-            break
-        }
+    let res = loop_with_retry(retry, (0..blk_size).rev().collect(), async |i| {
+        let mut iv = Vec::from(iv.clone());
+        let curr_padding = blk_size - i;
         //set the padding except for the current byte we're working on: \x02, \x03\x03, \x04\x04\x04, etc
-        for k in (blk_size - (curr_padding - 1) as usize)..blk_size {
-            let zero = intermediate_vector_shared.clone().lock().await[k as usize];
+        for k in (blk_size - (curr_padding - 1))..blk_size {
+            let zero = intermediate_vector_shared_copy.clone().lock().await[k as usize];
             iv[k as usize] = zero ^ curr_padding;
         }
 
@@ -81,7 +115,7 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
         let success_shared = Arc::new(AtomicBool::new(false));
         let cancellation_token = CancellationToken::new();
         for j in 0..=255 {
-            let intermediate_vector = intermediate_vector_shared.clone();
+            let intermediate_vector = intermediate_vector_shared_copy.clone();
             let mut iv_copy = iv.clone();
             let ct_block = ct_block.to_vec();
             let detector = detector_shared.clone();
@@ -126,23 +160,22 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
             _ = futures_set.join_all() =>{},
             _ = cancellation_token.cancelled() =>{}
         }
-        if !success_shared.load(Ordering::SeqCst) && curr_retry > 0 {
-            curr_retry -= 1;
-            // if not the first character
-            if i < blk_size as i16 - 1{
-                i += 1; // go back to previous character
-                curr_padding -= 1;
-            }
-            continue
-        }else if !success_shared.load(Ordering::SeqCst) {
+        if !success_shared.load(Ordering::SeqCst) {
             return Err(DecryptError::CouldNotDecryptClassic(
                 "Could not find valid padding".to_string(),
             ));
-        }else{
-            curr_retry = retry;
         }
-        curr_padding += 1;
-        i -= 1;
+        Ok(())
+    })
+    .await;
+
+    if !res {
+        return Err(DecryptError::CouldNotDecryptClassic(
+            "Could not find valid padding".to_string(),
+        ));
     }
+
+    /////////////////
+
     return Ok(intermediate_vector_shared.clone().lock().await.to_vec());
 }
