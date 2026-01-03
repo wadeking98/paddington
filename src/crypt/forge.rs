@@ -79,9 +79,8 @@ async fn _padding_forge<D: Detector + Send + Sync + 'static>(
     for block_index in (0..blocks.len()).rev() {
         let detector = detector_shared.clone();
         //get next two blocks
-        let mut current_blocks = Vec::from(&ciphertext_blocks[block_index..block_index + 2]);
+        let current_blocks = Vec::from(&ciphertext_blocks[block_index..block_index + 2]);
         let orig_first_block_copy = blocks[block_index].clone();
-        current_blocks[0] = vec![0u8; blk_size as usize];
 
         let tx = tx.clone();
 
@@ -97,7 +96,6 @@ async fn _padding_forge<D: Detector + Send + Sync + 'static>(
         );
 
         let intermediate_vector = calc_intermediate_vector(
-            current_blocks[0].clone(),
             current_blocks[1].clone(),
             detector,
             retry,

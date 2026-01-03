@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+use rand::RngCore;
 use tokio::{
     select, spawn,
     sync::{
@@ -92,18 +93,20 @@ async fn loop_with_retry<T, E>(
 }
 
 async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
-    iv: Vec<u8>,
     ct_block: Vec<u8>,
     detector: Arc<D>,
     retry: u8,
     tx: Sender<Messages>,
 ) -> Result<Vec<u8>, DecryptError> {
-    let blk_size = iv.len() as u8;
+    let blk_size = ct_block.len() as u8;
     let intermediate_vector_shared = Arc::new(Mutex::new(vec![0u8; blk_size as usize]));
     let intermediate_vector_shared_copy = intermediate_vector_shared.clone();
     let detector_shared = Arc::new(detector);
     let res = loop_with_retry(retry, (0..blk_size).rev().collect(), async |i| {
-        let mut iv = Vec::from(iv.clone());
+        let mut iv = vec![0u8; blk_size as usize];
+        // use random bytes instead of 00s for IV, works better with preventing bad bytes
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut iv);
         let curr_padding = blk_size - i;
         //set the padding except for the current byte we're working on: \x02, \x03\x03, \x04\x04\x04, etc
         for k in (blk_size - (curr_padding - 1))..blk_size {
