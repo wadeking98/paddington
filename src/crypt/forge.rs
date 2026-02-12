@@ -5,10 +5,10 @@ use tokio::sync::mpsc::Sender;
 use crate::{
     crypt::{
         MessageForwarder, calc_intermediate_vector,
-        detector::{Detector, Oracle, SimpleDetector},
+        detector::{Detector, SimpleDetector},
     },
     errors::DecryptError,
-    helper::{Config, Messages},
+    helper::{Config, Messages}, oracle::Oracle,
 };
 
 pub async fn padding_oracle_forge<O: Oracle>(
@@ -26,6 +26,7 @@ pub async fn padding_oracle_forge<O: Oracle>(
         let _ = tx.send(Messages::OracleConfirmed).await;
         return _padding_forge(pt, ct, classic_detector, retry, tx, blk_size).await;
     }
+    let _ = tx.send(Messages::NoOracleFound).await;
     Err(DecryptError::CouldNotDecryptClassic(
         "No padding oracle found".into(),
     ))

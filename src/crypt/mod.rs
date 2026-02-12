@@ -177,8 +177,5 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
             "Could not find valid padding".to_string(),
         ));
     }
-
-    /////////////////
-
     return Ok(intermediate_vector_shared.clone().lock().await.to_vec());
 }
