@@ -1,11 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 
 use futures::future::join_all;
 use rand::{Rng, RngCore, random_range, rng, seq::{IndexedRandom, IteratorRandom, SliceRandom}};
 use tokio::{
-    sync::{Mutex, Semaphore},
-    task::JoinSet,
+    select, sync::{Mutex, Semaphore}, task::JoinSet
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{errors::DecryptError, oracle::Oracle};
 
@@ -38,23 +38,29 @@ pub struct IntermediateDetector {
 }
 
 pub async fn check_byte_creates_invalid_pt(detector: &IntermediateDetector,test_byte:u8,blk_pos:usize, ct_block_left:&[u8], ct_block_right:&[u8], ct_prefix: &[u8], ct_suffix:&[u8], retry: usize) -> Result<bool, DecryptError>{
+    let is_invalid = Arc::new(AtomicBool::new(true));
+    let mut futures_set = vec![];
+    let canceled = CancellationToken::new();
     for _ in 0..retry{
         let mut test_block = ct_block_left.to_vec();
         let pos = (0..test_block.len()).filter(|p| *p!=blk_pos).choose(&mut rand::rng()).unwrap();
         test_block[pos] = test_block[pos] ^ 1 << random_range(0..8);
         test_block[blk_pos] = test_byte;
         let ct = [ct_prefix,test_block.as_slice(), ct_block_right, ct_suffix].concat();
-        let check = detector.check(&ct).await?;
-        // if check == DETECT::OUTLIER{
-        //     println!("check: {:?}", check);
-        // }
-        // if we ever detect a different response then we know that test byte doesn't produce an invalid byte
-        // in the next plaintext. If it did, all checks would return the same since the plaintext is always invalid
-        if check == DETECT::OUTLIER{
-            return Ok(false);
-        }
+        let canceled = canceled.clone();
+        let is_invalid = is_invalid.clone();
+        futures_set.push(async move{
+            if is_invalid.load(Ordering::SeqCst) && detector.check(&ct).await.is_ok_and(|c| c == DETECT::OUTLIER){
+                is_invalid.store(false, Ordering::SeqCst);
+                canceled.cancel();
+            }
+        });
     }
-    return Ok(true);
+    select! {
+        _ = join_all(futures_set) =>{}
+        _ = canceled.cancelled() =>{}
+    }
+    return Ok(is_invalid.load(Ordering::SeqCst))
 }
 
 fn find_satisfying_bytes(bad_chars: &[u8], creates_valid_chars: &[u8]) -> Vec<u8>{

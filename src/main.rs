@@ -145,10 +145,15 @@ async fn main() {
         if detect.is_ok(){
             println!("Intermediate Oracle Detected");
             let detector = detect.unwrap();
-            let block_for_decryption = detector.block_suffix[..*block_size as usize].to_vec();
-            let cradle = build_cradle(&detector, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, 1000).await.unwrap();
+            let chunks = detector.block_suffix.clone().chunks(*block_size as usize).map(|chunk| chunk.to_vec()).collect::<Vec<Vec<u8>>>();
+            let block_for_decryption = chunks[chunks.len()-2].clone();
+            let bad_chars = vec![ 0x00, 0x01, 0x02, 0x03, 0x22];
+            let cradle = build_cradle(&detector,&bad_chars, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, 1000).await.unwrap();
             println!("found cradle! {:?}", cradle);
-            println!("{:?}", detector.check(&[detector.block_prefix.clone(), cradle.0, block_for_decryption,  cradle.1, detector.block_suffix.clone()].concat()).await)
+            let iv = chunks[chunks.len()-3].clone();
+            let (pt, _) = decrypt_intermediate_block(&detector, &bad_chars, &iv, &cradle.0, &block_for_decryption, &detector.block_prefix, &[cradle.1, detector.block_suffix.clone()].concat(), *block_size as usize).await;
+            println!("{}", fmt_bytes_custom(&pt));
+            //println!("{:?}", detector.check(&[detector.block_prefix.clone(), cradle.0, block_for_decryption,  cradle.1, detector.block_suffix.clone()].concat()).await)
             //let cradle_verification = detector.check(&[detector.block_prefix.as_slice(), cradle.0.as_slice(), cradle.1.as_slice(), detector.block_suffix.as_slice()].concat()).await;
             //println!("cradle {:?}", cradle_verification);
             
