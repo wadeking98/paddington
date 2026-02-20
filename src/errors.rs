@@ -8,4 +8,6 @@ pub enum DecryptError {
     InvalidInput(String),
     #[error("Error when comparing responses for padding oracle attack: {0}")]
     DifferentialResponses(String),
+    #[error("Error when performing bad byte attack, you likely provided incorrect bad bytes: {0}")]
+    BadByteIssue(String)
 }

@@ -6,7 +6,8 @@ use std::{
     },
 };
 
-use rand::RngCore;
+use futures::future::join_all;
+use rand::{RngCore, random_range, seq::IteratorRandom};
 use tokio::{
     select, spawn,
     sync::{
@@ -18,7 +19,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    crypt::detector::{DETECT, Detector},
+    crypt::detector::{DETECT, Detector, IntermediateDetector},
     errors::DecryptError,
     helper::Messages,
 };
@@ -26,10 +27,11 @@ use crate::{
 pub mod decrypt;
 pub mod detector;
 pub mod forge;
+pub mod cradlehelpers;
 
-struct MessageForwarder {
+pub struct MessageForwarder {
     join_handle: JoinHandle<()>,
-    local_tx: Sender<Messages>,
+    pub local_tx: Sender<Messages>,
 }
 
 impl Drop for MessageForwarder {
@@ -39,7 +41,7 @@ impl Drop for MessageForwarder {
 }
 
 impl MessageForwarder {
-    fn new(tx: Sender<Messages>, msg_op: Box<dyn Fn(Messages) -> Messages + Send>) -> Self {
+    pub fn new(tx: Sender<Messages>, msg_op: Box<dyn Fn(Messages) -> Messages + Send>) -> Self {
         let (local_tx, mut local_rx) = mpsc::channel::<Messages>(255);
         let join_handle = spawn(async move {
             loop {
@@ -92,7 +94,7 @@ async fn loop_with_retry<T, E>(
     return true;
 }
 
-async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
+pub async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
     ct_block: Vec<u8>,
     detector: Arc<D>,
     retry: u8,
@@ -102,11 +104,11 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
     let intermediate_vector_shared = Arc::new(Mutex::new(vec![0u8; blk_size as usize]));
     let intermediate_vector_shared_copy = intermediate_vector_shared.clone();
     let detector_shared = Arc::new(detector);
-    let res = loop_with_retry(retry, (0..blk_size).rev().collect(), async |i| {
+    let res = loop_with_retry(retry, (0..blk_size).rev().collect(), async move |i| {
         let mut iv = vec![0u8; blk_size as usize];
         // use random bytes instead of 00s for IV, works better with preventing bad bytes
-        let mut rng = rand::rng();
-        rng.fill_bytes(&mut iv);
+        rand::rng().fill_bytes(&mut iv);
+        
         let curr_padding = blk_size - i;
         //set the padding except for the current byte we're working on: \x02, \x03\x03, \x04\x04\x04, etc
         for k in (blk_size - (curr_padding - 1))..blk_size {
@@ -114,7 +116,7 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
             iv[k as usize] = zero ^ curr_padding;
         }
 
-        let mut futures_set = JoinSet::new();
+        let mut futures_set = vec![];
         let success_shared = Arc::new(AtomicBool::new(false));
         let cancellation_token = CancellationToken::new();
         for j in 0..=255 {
@@ -125,7 +127,7 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
             let success = success_shared.clone();
             let tx = tx.clone();
             let cancellation_token = cancellation_token.clone();
-            futures_set.spawn(async move {
+            futures_set.push(async move {
                 // mark if we're actually updating this byte
                 let changed_byte = iv_copy[i as usize] != j;
                 iv_copy[i as usize] = j;
@@ -160,7 +162,7 @@ async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
             });
         }
         select! {
-            _ = futures_set.join_all() =>{},
+            _ = join_all(futures_set) =>{},
             _ = cancellation_token.cancelled() =>{}
         }
         if !success_shared.load(Ordering::SeqCst) {

@@ -7,7 +7,7 @@ use clap::ValueEnum;
 use base64::prelude::*;
 use urlencoding::{decode, encode};
 
-use crate::oracle::HTTPOracle;
+use crate::{transport::HTTPTransport};
 
 #[derive(Display, Debug, Clone, ValueEnum)]
 pub enum Encoding {
@@ -124,18 +124,18 @@ fn search_json_obj(
     None
 }
 
-pub fn set_injection_points(oracle: &mut HTTPOracle) -> Option<String> {
+pub fn set_injection_points(transport: &mut HTTPTransport) -> Option<String> {
     let mut found_ct = None;
     let injection_point = String::from("@{INJECT_HERE}@");
-    for p in oracle.params.clone() {
-        for i in 0..oracle.headers.len() {
-            if oracle.headers[i].0 == p {
-                found_ct = Some(oracle.headers[i].1.clone());
-                oracle.headers[i].1 = injection_point.clone();
+    for p in transport.params.clone() {
+        for i in 0..transport.headers.len() {
+            if transport.headers[i].0 == p {
+                found_ct = Some(transport.headers[i].1.clone());
+                transport.headers[i].1 = injection_point.clone();
             }
             //find cookies
-            if oracle.headers[i].0.to_ascii_lowercase().eq("cookie") {
-                let cookies = Cookie::split_parse(oracle.headers[i].1.clone());
+            if transport.headers[i].0.to_ascii_lowercase().eq("cookie") {
+                let cookies = Cookie::split_parse(transport.headers[i].1.clone());
                 let mut jar = CookieJar::new();
                 for cookie in cookies {
                     if let Ok(cookie) = cookie {
@@ -147,14 +147,14 @@ pub fn set_injection_points(oracle: &mut HTTPOracle) -> Option<String> {
                         }
                     }
                 }
-                oracle.headers[i].1 = jar
+                transport.headers[i].1 = jar
                     .iter()
                     .map(|c| c.to_string())
                     .collect::<Vec<String>>()
                     .join("; ");
             }
         }
-        let temp_url = oracle.url.clone();
+        let temp_url = transport.url.clone();
         let url = url_encoded_data::from(&temp_url);
         for query_param in url.as_pairs() {
             if p.eq(query_param.0) {
@@ -168,17 +168,17 @@ pub fn set_injection_points(oracle: &mut HTTPOracle) -> Option<String> {
                     })
                     .to_string();
 
-                if oracle.url.contains(&lower_hex_url_replace) {
+                if transport.url.contains(&lower_hex_url_replace) {
                     replace_str = lower_hex_url_replace;
-                } else if oracle.url.contains(&upper_hex_url_replace) {
+                } else if transport.url.contains(&upper_hex_url_replace) {
                     replace_str = upper_hex_url_replace;
                 }
                 found_ct = Some(query_param.1.to_string());
-                oracle.url = oracle.url.replace(&replace_str, &injection_point);
+                transport.url = transport.url.replace(&replace_str, &injection_point);
             }
         }
 
-        if let Some(ref mut body_data) = oracle.data {
+        if let Some(ref mut body_data) = transport.data {
             //parse from json data
             let json_data_res = serde_json::from_str(&body_data.clone());
             if let Ok(mut json_data) = json_data_res {

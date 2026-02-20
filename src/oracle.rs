@@ -1,201 +1,113 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use regex::{Regex, RegexBuilder};
-use reqwest::{Client, Method, Proxy, redirect::Policy};
+use futures::future::join_all;
+use tokio::sync::{Mutex, mpsc::Sender};
 
-use crate::helper::{Encoding, decode_ct, encode_ct, set_injection_points};
-
+use crate::{crypt::{cradlehelpers::{ComputeCache, build_cradle, decrypt_intermediate_block}, decrypt::_padding_decrypt, detector::{Detector, IntermediateDetector}, forge::_padding_forge}, errors::DecryptError, helper::Messages};
 
 #[async_trait]
 pub trait Oracle: 'static + Send + Sync {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String;
+    async fn decrypt(&self, ct:&[u8]) -> Result<Vec<u8>, DecryptError>;
+    async fn forge(&self, ct:&[u8], pt:&[u8]) -> Result<Vec<u8>, DecryptError>;
 }
 
-#[async_trait]
-impl<O: Oracle> Oracle for Arc<O> {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String {
-        self.as_ref().exec(ct, ct_prefix, ct_suffix).await
+pub struct SingleOracle<D: Detector> {
+    detector: D,
+    tx: Sender<Messages>,
+    block_size: usize,
+    retry: usize
+}
+
+impl<D:Detector> SingleOracle<D>{
+    pub fn new(detector: D, tx: Sender<Messages>, block_size: usize, retry:usize) -> Self{
+        return Self { detector, tx, block_size, retry }
     }
 }
 
 #[async_trait]
-impl<O: Oracle + ?Sized> Oracle for Box<O> {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String {
-        self.as_ref().exec(ct, ct_prefix, ct_suffix).await
+impl<D:Detector+Clone+Send> Oracle for SingleOracle<D> {
+    async fn decrypt(&self, ct:&[u8]) -> Result<Vec<u8>, DecryptError>{
+        return _padding_decrypt(ct, self.detector.clone(), self.retry, self.tx.clone(), self.block_size).await;
+    }
+    async fn forge(&self, ct:&[u8], pt:&[u8]) -> Result<Vec<u8>, DecryptError>{
+        return _padding_forge(pt, ct, self.detector.clone(),self.retry,self.tx.clone(),self.block_size).await;
     }
 }
 
-pub struct HTTPDoubleOracle {
-    single_oracle: HTTPOracle,
-    pub(crate) base_ct: Vec<u8>,
+pub struct DoubleOracle<D: Detector>{
+    single_oracle: SingleOracle<D>,
+    ct_prefix: Vec<u8>
 }
 
-impl HTTPDoubleOracle {
-    pub fn new(
-        url: String,
-        headers: Vec<(String, String)>,
-        method: Method,
-        data: Option<String>,
-        encoding: Vec<Encoding>,
-        params: Vec<String>,
-        search_pat: Option<String>,
-        proxy: Option<String>,
-    ) -> Self {
-        let oracle = HTTPOracle::new(
-            url, headers, method, data, encoding, params, search_pat, proxy,
-        );
-        let base_ct = oracle.base_ct.clone();
-        Self {
-            single_oracle: oracle,
-            base_ct,
-        }
+impl<D:Detector> DoubleOracle<D>{
+    pub fn new(detector: D, tx: Sender<Messages>,ct_prefix: &[u8], block_size: usize, retry:usize) -> Self{
+        return Self {single_oracle: SingleOracle::new( detector, tx, block_size, retry ), ct_prefix: ct_prefix.to_vec()}
     }
 }
 
 #[async_trait]
-impl Oracle for HTTPDoubleOracle {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String {
-        let ct = Vec::from_iter(self.base_ct.iter().chain(ct).cloned());
-        return self.single_oracle.exec(&ct, ct_prefix, ct_suffix).await;
+impl<D:Detector+Clone+Send> Oracle for DoubleOracle<D> {
+    // TODO: add ct_prefix to padding_decrypt
+    async fn decrypt(&self, ct:&[u8]) -> Result<Vec<u8>, DecryptError>{
+        return _padding_decrypt(ct, self.single_oracle.detector.clone(), self.single_oracle.retry, self.single_oracle.tx.clone(), self.single_oracle.block_size).await;
+    }
+    // TODO: add ct_prefix to padding_forge
+    async fn forge(&self, ct:&[u8], pt:&[u8]) -> Result<Vec<u8>, DecryptError>{
+        return _padding_forge(pt, ct, self.single_oracle.detector.clone(),self.single_oracle.retry,self.single_oracle.tx.clone(),self.single_oracle.block_size).await;
     }
 }
 
-pub struct HTTPOracle {
-    pub(crate) url: String,
-    pub(crate) headers: Vec<(String, String)>,
-    method: Method,
-    pub(crate) data: Option<String>,
-    encoding: Vec<Encoding>,
-    pub(crate) params: Vec<String>,
-    search_pat: Option<Regex>,
-    pub(crate) base_ct: Vec<u8>,
-    proxy: Option<Proxy>,
+pub struct IntermediateOracle{
+    tx: Sender<Messages>,
+    detector: IntermediateDetector,
+    block_size: usize,
+    bad_chars: Vec<u8>
+}
+
+impl IntermediateOracle {
+    pub fn new(detector: IntermediateDetector, tx: Sender<Messages>, block_size: usize, bad_chars: &[u8]) -> Self{
+        return Self { tx, detector, block_size, bad_chars: bad_chars.to_vec() };
+    }
 }
 
 #[async_trait]
-impl Oracle for HTTPOracle {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String {
-        let ct_prefix = ct_prefix.unwrap_or(vec![]);
-        let ct_suffix = ct_suffix.unwrap_or(vec![]);
-        let ct = [ct_prefix.as_slice(), ct, ct_suffix.as_slice()].concat();
-        let modified_ct =
-            encode_ct(&ct, self.encoding.clone()).expect("Invalid utf-8 string after encoding");
-        let injection_point = String::from("@{INJECT_HERE}@");
-        // insert into headers
-        let mut headers = vec![];
-        for mut header in self.headers.clone() {
-            header.1 = header.1.replace(&injection_point, &modified_ct);
-            headers.push(header);
-        }
-
-        // insert into body data
-        let mut data = None;
-        if let Some(body_data) = self.data.clone() {
-            data = Some(body_data.replace(&injection_point, &modified_ct));
-        }
-
-        // insert into url
-        let url = self.url.replace(&injection_point, &modified_ct);
-
-        let mut client_builder = Client::builder()
-            .redirect(Policy::none())
-            .http1_title_case_headers();
-
-        //add proxy
-        if let Some(p) = &self.proxy {
-            client_builder = client_builder.proxy(p.clone())
-        }
-
-        let client = client_builder
-            .build()
-            .expect("Error: could not build request");
-
-        let mut req = client.request(self.method.clone(), url);
-        // add request body
-        if let Some(body) = data {
-            req = req.body(body);
-        }
-
-        //add request headers
-        for header in headers {
-            req = req.header(header.0, header.1);
-        }
-
-        // println!("Sending request");
-        let response = req.send().await;
-        if response.is_err() {
-            return response.err().unwrap().to_string();
-        }
-
-        let response = response.unwrap();
-        let mut response_text = String::new();
-        response_text += &(response.status().as_str().to_owned() + "\n");
-        for header in response.headers().clone() {
-            let mut header_text = String::new();
-            if let Some(val) = header.0 {
-                if val.as_str().to_lowercase().contains("date") {
-                    // skip date strings since they always change
-                    continue;
-                }
-                header_text += &(val.as_str().to_owned() + ": ");
+impl Oracle for IntermediateOracle{
+    async fn decrypt(&self, ct:&[u8]) -> Result<Vec<u8>, DecryptError>{
+        let chunks = ct.to_vec().chunks(self.block_size).map(|chunk| chunk.to_vec()).collect::<Vec<Vec<u8>>>();
+        let mut cache = Some(ComputeCache::new());
+        let mut futures_set = vec![];
+        let pt_buffer = Arc::new(Mutex::new(vec![vec![0u8;self.block_size];chunks.len()-1]));
+        for i in 1..chunks.len(){
+            let iv = &chunks[i-1];
+            let block_for_decryption = &chunks[i];
+            let mut cradle = None;
+            if i == 1{
+                cradle = build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 2000).await;
             }
-            header_text += &(header.1.to_str().unwrap().to_owned() + "\n");
-            response_text += &header_text;
+            let mut cradle = cradle.clone();
+            let bad_chars = self.bad_chars.clone();
+            let mut cache = cache.clone();
+            let detector = self.detector.clone();
+            let pt_buffer = pt_buffer.clone();
+            futures_set.push(async move{
+                if cradle.is_none(){
+                    cradle = build_cradle(&detector,&bad_chars, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, &mut cache, 2000).await;
+                }
+                if let Some(cradle) = cradle {
+                    println!("found cradle {:?}", cradle);
+                    let (pt, _) = decrypt_intermediate_block(&detector, &bad_chars, iv, &cradle.0, block_for_decryption, &detector.block_prefix, &[cradle.1, detector.block_suffix.clone()].concat(), self.block_size).await.unwrap();
+                    let mut pt_buff = pt_buffer.lock().await;
+                    pt_buff[i-1] = pt;
+                }
+            });
         }
-        let response_body = response
-            .text()
-            .await
-            .expect("Error: could not convert response body to text");
-        response_text += &response_body;
+        join_all(futures_set).await;
+        return Ok(pt_buffer.lock().await.concat());
+    }
 
-        if let Some(search) = &self.search_pat {
-            return match search.find(&response_text) {
-                Some(_) => String::from("matches"),
-                None => String::from("no match"),
-            };
-        }
-        return response_text;
+    async fn forge(&self, ct:&[u8], pt:&[u8]) -> Result<Vec<u8>, DecryptError>{
+        return Ok(vec![]);
     }
 }
 
-impl HTTPOracle {
-    pub fn new(
-        url: String,
-        headers: Vec<(String, String)>,
-        method: Method,
-        data: Option<String>,
-        encoding: Vec<Encoding>,
-        params: Vec<String>,
-        search_pat: Option<String>,
-        proxy: Option<String>,
-    ) -> Self {
-        let mut pat = None;
-        if let Some(search_pat) = search_pat {
-            let re = RegexBuilder::new(&search_pat)
-                .multi_line(true)
-                .build()
-                .expect(&("Error: Failed to compile regex ".to_owned() + &search_pat));
-            pat = Some(re);
-        }
-        let mut prox = None;
-        if let Some(p) = proxy {
-            prox = Some(Proxy::all(p).expect("Error: Invalid proxy"));
-        }
-        let mut oracle = Self {
-            url,
-            headers,
-            method,
-            data,
-            encoding,
-            params,
-            search_pat: pat,
-            base_ct: vec![],
-            proxy: prox,
-        };
-        let ct = set_injection_points(&mut oracle).expect("Error: No injection points found");
-        let ct = decode_ct(ct, oracle.encoding.clone());
-        oracle.base_ct = ct;
-        return oracle;
-    }
-}

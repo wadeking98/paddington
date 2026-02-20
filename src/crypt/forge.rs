@@ -8,13 +8,13 @@ use crate::{
         detector::{Detector, SimpleDetector},
     },
     errors::DecryptError,
-    helper::{Config, Messages}, oracle::Oracle,
+    helper::{Config, Messages}, transport::Transport,
 };
 
-pub async fn padding_oracle_forge<O: Oracle>(
+pub async fn padding_oracle_forge<T: Transport>(
     pt: &[u8],
     ct: &[u8],
-    oracle: O,
+    transport: T,
     tx: Sender<Messages>,
     config: Config,
 ) -> Result<Vec<u8>, DecryptError> {
@@ -22,9 +22,9 @@ pub async fn padding_oracle_forge<O: Oracle>(
     let threads = config.get_int("threads".to_owned(), 10) as usize;
     let retry = config.get_int("retry".to_owned(), 5) as u8;
     // classic padding oracle
-    if let Ok(classic_detector) = SimpleDetector::init(ct, oracle, blk_size, threads).await {
+    if let Ok(classic_detector) = SimpleDetector::init(ct, transport, blk_size, threads).await {
         let _ = tx.send(Messages::OracleConfirmed).await;
-        return _padding_forge(pt, ct, classic_detector, retry, tx, blk_size).await;
+        return _padding_forge(pt, ct, classic_detector, retry.into(), tx, blk_size).await;
     }
     let _ = tx.send(Messages::NoOracleFound).await;
     Err(DecryptError::CouldNotDecryptClassic(
@@ -33,11 +33,11 @@ pub async fn padding_oracle_forge<O: Oracle>(
 }
 
 // we don't really need the cipher text, we could make our own, but it keeps the Detector consistent with the decryption step
-async fn _padding_forge<D: Detector + Send + Sync + 'static>(
+pub async fn _padding_forge<D: Detector + Send + Sync + 'static>(
     pt: &[u8],
     ct: &[u8],
     detector: D,
-    retry: u8,
+    retry: usize,
     tx: Sender<Messages>,
     blk_size: usize,
 ) -> Result<Vec<u8>, DecryptError> {
@@ -99,7 +99,7 @@ async fn _padding_forge<D: Detector + Send + Sync + 'static>(
         let intermediate_vector = calc_intermediate_vector(
             current_blocks[1].clone(),
             detector,
-            retry,
+            retry as u8,
             msg_forwarder.local_tx.clone(),
         )
         .await?;
