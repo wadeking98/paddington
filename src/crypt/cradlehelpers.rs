@@ -2,10 +2,10 @@ use std::{collections::HashMap, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 
 use futures::{future::join_all, lock::Mutex};
 use rand::{random_range, seq::IteratorRandom};
-use tokio::select;
+use tokio::{select, sync::mpsc::Sender};
 use tokio_util::sync::CancellationToken;
 
-use crate::{crypt::detector::{DETECT, Detector, IntermediateDetector}, errors::DecryptError};
+use crate::{crypt::detector::{DETECT, Detector, IntermediateDetector}, errors::DecryptError, helper::Messages};
 
 #[derive(Clone, Debug)]
 pub struct ComputeCache{
@@ -77,7 +77,7 @@ fn find_satisfying_bytes(bad_chars: &[u8], creates_valid_chars: &[u8]) -> Vec<u8
 pub async fn calculate_byte(detector:&IntermediateDetector, blk_pos:usize, bad_chars: &[u8], ct_block_left:&[u8], ct_block_right:&[u8], ct_prefix: &[u8], ct_suffix:&[u8]) -> Result<(Vec<u8>, Vec<u8>), DecryptError>{
     let mut creates_valid_chars = vec![];
     let mut satisfying_bytes = vec![];
-    let retry = 20;
+    let retry = 100;
     for _ in 0..retry{
         let bytes = (0..255).filter(|b|!creates_valid_chars.contains(b)).map(|b|b).collect::<Vec<u8>>();
         let mut success = false;
@@ -85,7 +85,7 @@ pub async fn calculate_byte(detector:&IntermediateDetector, blk_pos:usize, bad_c
 
             // if all responses are the same then we've found an invalid char
             let check_byte = xor_byte ^ ct_block_left[blk_pos];
-            let resp = check_byte_creates_invalid_pt(detector, check_byte, blk_pos, ct_block_left, ct_block_right,ct_prefix,ct_suffix, 10).await;
+            let resp = check_byte_creates_invalid_pt(detector, check_byte, blk_pos, ct_block_left, ct_block_right,ct_prefix,ct_suffix, 15).await;
             //if byte creates a valid string
             if resp.is_ok_and(|is_invalid| !is_invalid){
                 creates_valid_chars.push(xor_byte);
@@ -106,9 +106,6 @@ pub async fn calculate_byte(detector:&IntermediateDetector, blk_pos:usize, bad_c
     }
     
     if satisfying_bytes.len() >= 1{
-        if satisfying_bytes.len() > 1{
-            println!("found multiple valid bytes: {:?}", satisfying_bytes);
-        }
         return Ok((satisfying_bytes.clone(), creates_valid_chars.iter().map(|b| b ^ satisfying_bytes[0]).collect::<Vec<u8>>()));
     }else{
         println!("Error: no satisfying byte found, exiting {:?}", satisfying_bytes);
@@ -118,7 +115,7 @@ pub async fn calculate_byte(detector:&IntermediateDetector, blk_pos:usize, bad_c
 
 /// when multiple bytes are returned from the calc byte function, this removes the most common byte
 /// from the set, which is usually the incorrect byte. Also it normalizes the valid bytes
-fn calc_multi_to_single_bytes(multi_bytes: Vec<(usize, Vec<u8>)>) -> Vec<(usize, u8)>{
+fn calc_multi_to_single_bytes(multi_bytes: Vec<(usize, Vec<u8>, u8)>) -> Vec<(usize, u8,u8)>{
     //handle the multiple bytes
     let mut counts: HashMap<u8, usize> = HashMap::new();
 
@@ -128,14 +125,14 @@ fn calc_multi_to_single_bytes(multi_bytes: Vec<(usize, Vec<u8>)>) -> Vec<(usize,
     let (common_byte,_) = counts.iter().max_by_key(|&(_,val)|val).unwrap_or((&0,&0));
     let single_bytes = multi_bytes.iter().map(|e| {
         let filtered_byte = e.1.clone().into_iter().filter(|b| b != common_byte).next().unwrap_or(0);
-        return (e.0, filtered_byte);
-    }).collect::<Vec<(usize, u8)>>();
+        return (e.0, filtered_byte, e.2);
+    }).collect::<Vec<(usize, u8,u8)>>();
     return single_bytes;
 }
 
 /// Use ct_block_left to decrypt ct_block_right.
 /// It returns the plaintext and an array of valid bytes
-pub async fn decrypt_intermediate_block(detector:&IntermediateDetector,bad_chars: &[u8], iv:&[u8], ct_block_left:&[u8], ct_block_right:&[u8], ct_prefix: &[u8], ct_suffix:&[u8], blk_size: usize) -> Result<(Vec<u8>, Vec<u8>), DecryptError>{
+pub async fn decrypt_intermediate_block(detector:&IntermediateDetector,bad_chars: &[u8], iv:&[u8], ct_block_left:&[u8], ct_block_right:&[u8], ct_prefix: &[u8], ct_suffix:&[u8], blk_size: usize, tx: Sender<Messages>) -> Result<(Vec<u8>, Vec<u8>), DecryptError>{
     let pt_bytes_shared = Arc::new(Mutex::new(vec![0u8;blk_size]));
     let valid_bytes_shared = Arc::new(Mutex::new(vec![]));
     let multi_bytes = Arc::new(Mutex::new(vec![]));
@@ -146,18 +143,20 @@ pub async fn decrypt_intermediate_block(detector:&IntermediateDetector,bad_chars
         let valid_bytes_copy = valid_bytes_shared.clone();
         let has_error = has_error.clone();
         let multi_bytes = multi_bytes.clone();
+        let tx = tx.clone();
         futures.push(async move{
             if let Ok(res) = calculate_byte(detector, blk_pos, bad_chars, ct_block_left, ct_block_right, ct_prefix, ct_suffix).await{
                 if res.0.len() == 1{
                     let pt_byte = res.0[0];
                     pt_bytes_copy.lock().await[blk_pos] = pt_byte;
-                    let mut valid_bytes = valid_bytes_copy.lock().await;
-                    let mut new_valid_bytes = res.1.into_iter().map(|b| b ^ pt_byte).filter(|b| !valid_bytes.contains(b)).collect::<Vec<u8>>();
-                    valid_bytes.append(&mut new_valid_bytes);
-                    valid_bytes.sort();
+                    let _ = tx.send(Messages::ByteFound(pt_byte, blk_pos)).await;
                 }else if res.0.len() > 1{
-                    multi_bytes.lock().await.push((blk_pos, res.0));
+                    multi_bytes.lock().await.push((blk_pos, res.0.clone(), 0));
                 }
+                let mut valid_bytes = valid_bytes_copy.lock().await;
+                let mut new_valid_bytes = res.1.into_iter().filter(|b| !valid_bytes.contains(b)).collect::<Vec<u8>>();
+                valid_bytes.append(&mut new_valid_bytes);
+                valid_bytes.sort();
             }else{
                 // signal that we ran into an error decrypting a byte
                 has_error.cancel();
@@ -176,8 +175,9 @@ pub async fn decrypt_intermediate_block(detector:&IntermediateDetector,bad_chars
     // find most commonly occurring byte. when the calculate byte functionality returned two satisfying bytes instead of one, the incorrect byte it returned
     // was almost always 0xdd, idk why. 
     let single_bytes = calc_multi_to_single_bytes(multi_bytes.lock().await.to_vec());
-    for (i, byte) in single_bytes{
+    for (i, byte, _) in single_bytes{
         pt_bytes_shared.lock().await[i] = byte;
+        let _ = tx.send(Messages::ByteFound(byte, i)).await;
     }
 
     let almost_pt = pt_bytes_shared.lock().await.to_vec();
@@ -241,7 +241,7 @@ async fn _make_prime(detector: &IntermediateDetector, ct: &[u8],ct_prefix: &[u8]
     return None;
 }
 
-pub async fn build_cradle(detector: &IntermediateDetector, bad_chars: &[u8], cradle_block: &[u8], ct_prefix: &[u8], ct_suffix:&[u8], cache_opt: &mut Option<ComputeCache>, retry:u16) -> Option<(Vec<u8>, Vec<u8>)>{
+pub async fn build_cradle(detector: &IntermediateDetector, bad_chars: &[u8], cradle_block: &[u8], ct_prefix: &[u8], ct_suffix:&[u8], cache_opt: &mut Option<ComputeCache>, retry:u16) -> Result<(Vec<u8>, Vec<u8>), DecryptError>{
 let blk_size = cradle_block.len();
 // Find [c1’] such that [c1][c1’][c2][c3][c4] is valid
 let c1 = ct_prefix[ct_prefix.len()-blk_size..].to_vec();
@@ -254,9 +254,9 @@ if let Some(c) = cache_opt && c.c1_prime.len() > 0 && c.c2_prime.0.len() > 0 && 
     c1_prime = c.c1_prime.clone();
     cache_used = true;
 }else{
-    let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,None).await;
+    let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
     if res.is_none(){
-        return None;
+        return Err(DecryptError::CradleBuildIssue("Could not find c1_prime".to_string()));
     }
     c1_prime = res.unwrap();
 }
@@ -279,7 +279,7 @@ loop {
         let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime].concat(),ct_suffix, retry,None).await;
         println!("c2_prime: {:?}", res);
         if res.is_none(){
-            return None;
+            return Err(DecryptError::CradleBuildIssue("Could not find c2_prime".to_string()));;
         }
         c2_prime = res.unwrap();
         //add new cache entry if it has not been initialized
@@ -315,15 +315,15 @@ loop {
             } else if let Ok((satisfying_bytes, found_valid_bytes)) = calculate_byte(detector, pos, &bad_chars, &c1_prime, &c2_prime, ct_prefix, ct_suffix).await{
                 if satisfying_bytes.len() == 1{
                     let byte = satisfying_bytes[0];
-                    let mut valid_bytes = valid_bytes.lock().await;
-                    let valid_bytes_copy = valid_bytes.clone();
-                    valid_bytes.append(&mut found_valid_bytes.into_iter().filter(|v| !valid_bytes_copy.contains(v)).collect::<Vec<u8>>());
                     let intermediate_block_byte = byte ^ c1_prime[pos];
                     println!("found intermediate block byte: {:2x?}", intermediate_block_byte);
                     found_intermediate_block_bytes.lock().await.push((pos, intermediate_block_byte));
                 }else if satisfying_bytes.len() > 1 {
-                    multi_bytes.lock().await.push((pos, satisfying_bytes));
+                    multi_bytes.lock().await.push((pos, satisfying_bytes, c1_prime[pos]));
                 }
+                let mut valid_bytes = valid_bytes.lock().await;
+                let valid_bytes_copy = valid_bytes.clone();
+                valid_bytes.append(&mut found_valid_bytes.into_iter().filter(|v| !valid_bytes_copy.contains(v)).collect::<Vec<u8>>());
             }
         });
     }
@@ -333,7 +333,7 @@ loop {
     // was almost always 0xdd, idk why. 
     let single_bytes = calc_multi_to_single_bytes(multi_bytes.lock().await.to_vec());
     for entry in single_bytes{
-        found_intermediate_block_bytes.lock().await.push(entry);
+        found_intermediate_block_bytes.lock().await.push((entry.0, entry.1 ^ entry.2));
     }
 
     let found_intermediate_block_bytes = found_intermediate_block_bytes.lock().await.to_vec();
@@ -365,6 +365,11 @@ loop {
                 c1_prime = res;
                 println!("found new c1_prime: {:2x?}", c1_prime);
                 success = true;
+            // try high entropy if valid bytes approach fails
+            }else if let Some(res) = _make_prime(detector, &c1_prime, ct_prefix, &[&c2_prime, ct_suffix].concat(), retry, Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: Some(fixed_pos.clone()), valid_bytes: None })).await{
+                c1_prime = res;
+                println!("found new c1_prime high_entropy: {:2x?}", c1_prime);
+                success = true;
             }else{
                 println!("c1 and c2 prime: {:2x?} {:2x?}", c1_prime, c2_prime);
                 println!("c1 and c2 prime: {:2x?} {:2x?} {:2x?}", cache_opt.as_ref().unwrap().c1_prime, cache_opt.as_ref().unwrap().c2_prime.0, cache_opt.as_ref().unwrap().c2_prime.1);
@@ -386,16 +391,16 @@ loop {
 println!("finishing cradle");
 
 //build a list of multiple c1_primes
-let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,None).await;
+let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
 if res.is_none(){
-    return None;
+    return Err(DecryptError::CradleBuildIssue("Could not find c1_prime while finishing cradle".to_string()));
 }
 let c1_prime_init = res.unwrap();
 
 let c2 = c1.clone();
-let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime_init].concat(),ct_suffix, retry,None).await;
+let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime_init].concat(),ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
 if res.is_none(){
-    return None;
+    return Err(DecryptError::CradleBuildIssue("Could not find c2_prime while finishing cradle".to_string()));
 }
 let c2_prime_init = res.unwrap();
 
@@ -413,6 +418,6 @@ loop{
 if let Some(c) = cache_opt{
     c.valid_bytes = valid_bytes.lock().await.to_vec();
 }
-
-return Some((valid_prime, c2_prime))
+println!("found cradle: {:?}", (valid_prime.clone(), c2_prime.clone()));
+return Ok((valid_prime, c2_prime))
 }

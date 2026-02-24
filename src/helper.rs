@@ -23,6 +23,7 @@ pub enum Messages {
     ByteFound(u8, usize),
     AttackComplete,
     NoOracleFound,
+    FoundCradle
 }
 
 #[derive(Clone)]
