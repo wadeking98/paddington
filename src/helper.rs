@@ -1,10 +1,29 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, string::FromUtf8Error};
+use cookie::{Cookie, CookieJar};
+use regex::Regex;
+use serde_json::Value;
+use strum_macros::Display;
+use clap::ValueEnum;
+use base64::prelude::*;
+use urlencoding::{decode, encode};
+
+use crate::{transport::HTTPTransport};
+
+#[derive(Display, Debug, Clone, ValueEnum)]
+pub enum Encoding {
+    HEX,
+    B64,
+    B64Url,
+    URL,
+}
 
 #[derive(Debug)]
 pub enum Messages {
     OracleConfirmed,
     ByteFound(u8, usize),
     AttackComplete,
+    NoOracleFound,
+    FoundCradle
 }
 
 #[derive(Clone)]
@@ -38,4 +57,179 @@ impl Config {
     pub fn set(&mut self, key: String, val: String) {
         self.0.insert(key, val);
     }
+}
+
+pub fn encode_ct(ct: &[u8], encoding: Vec<Encoding>) -> Result<String, FromUtf8Error> {
+    let mut res = Vec::from(ct);
+    // encode bytes
+    for enc in encoding.clone().iter().rev() {
+        res = match enc {
+            Encoding::HEX => hex::encode(res).as_bytes().to_vec(),
+            Encoding::B64 => BASE64_STANDARD.encode(res).as_bytes().to_vec(),
+            Encoding::B64Url => BASE64_URL_SAFE.encode(res).as_bytes().to_vec(),
+            Encoding::URL => {
+                encode(&String::from_utf8(res).expect("Error: invalid string when url encoding"))
+                    .as_bytes()
+                    .to_vec()
+            }
+        };
+    }
+    return String::from_utf8(res);
+}
+
+pub fn decode_ct(ct: String, encoding: Vec<Encoding>) -> Vec<u8> {
+    // decode bytes
+    let mut res = Vec::from(ct.as_bytes());
+    for enc in encoding {
+        res = match enc {
+            Encoding::HEX => hex::decode(String::from_utf8(res).expect("Error: invalid string"))
+                .expect("Error: invalid hex string"),
+            Encoding::B64 => BASE64_STANDARD
+                .decode(String::from_utf8(res).expect("Error: invalid string"))
+                .expect("Error: invalid b64 string"),
+            Encoding::B64Url => BASE64_URL_SAFE
+                .decode(String::from_utf8(res).expect("Error: invalid string"))
+                .expect("Error: invalid b64 url string"),
+            Encoding::URL => {
+                decode(&String::from_utf8(res).expect("Error: invalid string when url decoding"))
+                    .expect("Error: invalid encoded url string")
+                    .as_bytes()
+                    .to_vec()
+            }
+        };
+    }
+    return res;
+}
+
+fn search_json_obj(
+    val: &mut Value,
+    search_key: String,
+    replace_opt: Option<String>,
+) -> Option<String> {
+    if let Value::Object(map) = val {
+        for (key, value) in map {
+            if key.eq(&search_key) && value.is_string() {
+                let res = Some(value.as_str().unwrap().into());
+                if let Some(replace) = replace_opt.clone() {
+                    *value = serde_json::Value::String(replace);
+                }
+                return res;
+            } else if value.is_object() {
+                let res = search_json_obj(value, search_key.clone(), replace_opt.clone());
+                if let Some(res_val) = res {
+                    return Some(res_val);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn set_injection_points(transport: &mut HTTPTransport) -> Option<String> {
+    let mut found_ct = None;
+    let injection_point = String::from("@{INJECT_HERE}@");
+    for p in transport.params.clone() {
+        for i in 0..transport.headers.len() {
+            if transport.headers[i].0 == p {
+                found_ct = Some(transport.headers[i].1.clone());
+                transport.headers[i].1 = injection_point.clone();
+            }
+            //find cookies
+            if transport.headers[i].0.to_ascii_lowercase().eq("cookie") {
+                let cookies = Cookie::split_parse(transport.headers[i].1.clone());
+                let mut jar = CookieJar::new();
+                for cookie in cookies {
+                    if let Ok(cookie) = cookie {
+                        if cookie.name().eq(&p) {
+                            found_ct = Some(cookie.value().to_string());
+                            jar.add((cookie.name().to_owned(), injection_point.clone()));
+                        } else {
+                            jar.add(cookie);
+                        }
+                    }
+                }
+                transport.headers[i].1 = jar
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<String>>()
+                    .join("; ");
+            }
+        }
+        let temp_url = transport.url.clone();
+        let url = url_encoded_data::from(&temp_url);
+        for query_param in url.as_pairs() {
+            if p.eq(query_param.0) {
+                let mut replace_str = query_param.1.to_string();
+                // url param parser removes url encoding so we may need to add it back
+                let upper_hex_url_replace = urlencoding::encode(&replace_str).to_string();
+                let re = Regex::new(r"%([0-9a-fA-F]{2})").unwrap();
+                let lower_hex_url_replace = re
+                    .replace_all(&upper_hex_url_replace, |cap: &regex::Captures| {
+                        format!("%{}", cap[1].to_ascii_lowercase())
+                    })
+                    .to_string();
+
+                if transport.url.contains(&lower_hex_url_replace) {
+                    replace_str = lower_hex_url_replace;
+                } else if transport.url.contains(&upper_hex_url_replace) {
+                    replace_str = upper_hex_url_replace;
+                }
+                found_ct = Some(query_param.1.to_string());
+                transport.url = transport.url.replace(&replace_str, &injection_point);
+            }
+        }
+
+        if let Some(ref mut body_data) = transport.data {
+            //parse from json data
+            let json_data_res = serde_json::from_str(&body_data.clone());
+            if let Ok(mut json_data) = json_data_res {
+                if let Some(success_res) =
+                    search_json_obj(&mut json_data, p.clone(), Some(injection_point.clone()))
+                {
+                    found_ct = Some(success_res.clone());
+                    if let Ok(string_data) = serde_json::to_string(&json_data) {
+                        *body_data = string_data;
+                    }
+                }
+            }
+
+            //parse url form body data
+            let data = body_data.clone();
+            let form_data = url_encoded_data::from(&data);
+            for query_param in form_data.as_pairs() {
+                if *query_param.0 == p {
+                    found_ct = Some(query_param.1.to_string());
+                    *body_data = body_data.replace(&query_param.1.to_string(), &injection_point);
+                }
+            }
+        }
+    }
+    return found_ct;
+}
+
+pub fn parse_bad_chars(bad_chars: Option<String>) -> Vec<u8>{
+
+    if let Some(char_str) = bad_chars{
+        let mut bytes = Vec::new();
+        let mut chars = char_str.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '\\' && chars.peek() == Some(&'x') {
+                chars.next(); // consume 'x'
+
+                let hi = chars.next().unwrap_or('0');
+                let lo = chars.next().unwrap_or('0');
+
+                let hex = format!("{}{}", hi, lo);
+                let value = u8::from_str_radix(&hex, 16).unwrap_or(0);
+
+                bytes.push(value);
+            } else {
+                bytes.push(c as u8);
+            }
+        }
+        return bytes;
+    }
+    // return JSON bad char configuration
+    return vec![ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x22];
 }

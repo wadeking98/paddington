@@ -1,43 +1,27 @@
-use std::sync::{
+use std::{ops::Index, sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
-};
+}};
 
 use futures::future::join_all;
-use tokio::sync::{Mutex, mpsc::Sender};
+use rand::{Rng, random_range, seq::IteratorRandom};
+use tokio::{select,task::{JoinHandle, JoinSet}, sync::{Mutex, mpsc::Sender}};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     crypt::{
         MessageForwarder, calc_intermediate_vector,
-        detector::{Detector, Oracle, SimpleDetector},
+        detector::{DETECT, Detector, IntermediateDetector, SimpleDetector},
     },
     errors::DecryptError,
-    helper::{Config, Messages},
+    helper::{Config, Messages}, transport::Transport, print::fmt_bytes_custom,
 };
 
-pub async fn padding_oracle_decrypt<O: Oracle>(
-    ct: &[u8],
-    oracle: O,
-    tx: Sender<Messages>,
-    config: Config,
-) -> Result<Vec<u8>, DecryptError> {
-    let blk_size = config.get_int("blk_size".to_owned(), 16) as usize;
-    let threads = config.get_int("threads".to_owned(), 10) as usize;
-    let retry = config.get_int("retry".to_owned(), 5) as u8;
-    // classic padding oracle
-    if let Ok(classic_detector) = SimpleDetector::init(ct, oracle, blk_size, threads).await {
-        let _ = tx.send(Messages::OracleConfirmed).await;
-        return _padding_decrypt(ct, classic_detector, retry, tx, blk_size).await;
-    }
-    Err(DecryptError::CouldNotDecryptClassic(
-        "No padding oracle found".into(),
-    ))
-}
-
-async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
+pub async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
+    ct_prefix: &[u8],
     ct: &[u8],
     detector: D,
-    retry: u8,
+    retry: usize,
     tx: Sender<Messages>,
     blk_size: usize,
 ) -> Result<Vec<u8>, DecryptError> {
@@ -84,9 +68,10 @@ async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
 
         futures_set.push(async move {
             let intermediate_vector = calc_intermediate_vector(
+                ct_prefix.to_vec(),
                 current_blocks[1].clone(),
                 detector,
-                retry,
+                retry as u8,
                 msg_forwarder.local_tx.clone(),
             )
             .await;
