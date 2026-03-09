@@ -32,7 +32,10 @@ a quotation mark. This can be used to perform a padding oracle attack since the 
 written a certain byte to a certain position. Note that no padding was actually used in this attack,  
 opening up possibilities of exploiting other AES modes like CFB and OFB which don't use padding.  
 
-**Note: the intermediate ciphertext attack hasn't been implemented yet, research is ongoing**
+## Attention: the intermediate ciphertext attack has now been implemented. 
+Paddington should automatically detect and exploit intermediate ciphertext attacks. Note that this type of
+attack is very time-consuming, so be patient. Depending on the size of the ciphertext and speed of the
+connection, expect at least 20 minutes - 1 hour.
 
 ## Usage
 ```
