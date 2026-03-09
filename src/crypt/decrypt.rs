@@ -17,28 +17,8 @@ use crate::{
     helper::{Config, Messages}, transport::Transport, print::fmt_bytes_custom,
 };
 
-
-pub async fn padding_oracle_decrypt<T: Transport>(
-    ct: &[u8],
-    transport: T,
-    tx: Sender<Messages>,
-    config: Config,
-) -> Result<Vec<u8>, DecryptError> {
-    let blk_size = config.get_int("blk_size".to_owned(), 16) as usize;
-    let threads = config.get_int("threads".to_owned(), 10) as usize;
-    let retry = config.get_int("retry".to_owned(), 5) as usize;
-    // classic padding oracle
-    if let Ok(classic_detector) = SimpleDetector::init(ct, transport, blk_size, threads).await {
-        let _ = tx.send(Messages::OracleConfirmed).await;
-        return _padding_decrypt(ct, classic_detector, retry, tx, blk_size).await;
-    }
-    let _ = tx.send(Messages::NoOracleFound).await;
-    Err(DecryptError::CouldNotDecryptClassic(
-        "No padding oracle found".into(),
-    ))
-}
-
 pub async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
+    ct_prefix: &[u8],
     ct: &[u8],
     detector: D,
     retry: usize,
@@ -88,6 +68,7 @@ pub async fn _padding_decrypt<D: Detector + 'static + Send + Sync>(
 
         futures_set.push(async move {
             let intermediate_vector = calc_intermediate_vector(
+                ct_prefix.to_vec(),
                 current_blocks[1].clone(),
                 detector,
                 retry as u8,

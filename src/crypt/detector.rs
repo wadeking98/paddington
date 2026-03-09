@@ -118,6 +118,7 @@ pub struct SimpleDetector {
 
 impl SimpleDetector {
     pub async fn init(
+        ct_prefix: Option<Vec<u8>>,
         ct: &[u8],
         transport: impl Transport,
         blk_size: usize,
@@ -126,7 +127,7 @@ impl SimpleDetector {
     where
         Self: Sized,
     {
-        _detect(ct, None, None, transport, blk_size, threads).await
+        _detect(ct, ct_prefix, None, transport, blk_size, threads).await
     }
 }
 
@@ -204,7 +205,6 @@ async fn _detect(
     futures_set.join_all().await;
     let response_map_acquired = response_map_shared.lock().await;
     if response_map_acquired.keys().len() <= 1 {
-        println!("no unique responses found");
         return Err(DecryptError::DifferentialResponses(
             "No unique responses found".into(),
         ));

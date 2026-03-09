@@ -29,7 +29,7 @@ pub fn fmt_bytes_custom(bytes: &[u8]) -> String {
 }
 
 ///displays a progress bar to the terminal. updates to the bytes are received from rx
-pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
+pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) -> impl Fn() {
         let curr_results: Vec<u8> = vec![b'-'; ct_len];
         let curr_results_modified: Vec<bool> = vec![false; ct_len];
         let loading_map = HashMap::from([(b'|', b'/'), (b'/', b'-'), (b'-', b'\\'), (b'\\', b'|')]);
@@ -40,7 +40,7 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
         
         let token = CancellationToken::new();
         let cloned_token = token.clone();
-        spawn(async move {
+        let handle1 = spawn(async move {
             loop {
                 let msg = rx.recv().await;
                 if let Some(msg) = msg {
@@ -60,13 +60,18 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
                         Messages::NoOracleFound => {
                             token.cancel();
                             return;
+                        },
+                        Messages::FoundCradle =>{
+                            print!("\r\x1B[2K");
+                            io::stdout().flush().unwrap();
+                            println!("{}", "Found Cradle!".green());
                         }
                         _ => (),
                     };
                 }
             }
         });
-        spawn(async move {
+        let handle2 = spawn(async move {
             let truncate_len = 64;
             loop {
                 select! {
@@ -103,4 +108,10 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) {
                 io::stdout().flush().unwrap();
             }
         });
+        return move || {
+            handle1.abort();
+            handle2.abort();
+            print!("\r\x1B[2K");
+            io::stdout().flush().unwrap();
+        }
 }

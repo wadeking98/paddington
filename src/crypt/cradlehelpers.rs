@@ -108,7 +108,6 @@ pub async fn calculate_byte(detector:&IntermediateDetector, blk_pos:usize, bad_c
     if satisfying_bytes.len() >= 1{
         return Ok((satisfying_bytes.clone(), creates_valid_chars.iter().map(|b| b ^ satisfying_bytes[0]).collect::<Vec<u8>>()));
     }else{
-        println!("Error: no satisfying byte found, exiting {:?}", satisfying_bytes);
         return Err(DecryptError::BadByteIssue("".to_string()));
     }
 }
@@ -147,7 +146,7 @@ pub async fn decrypt_intermediate_block(detector:&IntermediateDetector,bad_chars
         futures.push(async move{
             if let Ok(res) = calculate_byte(detector, blk_pos, bad_chars, ct_block_left, ct_block_right, ct_prefix, ct_suffix).await{
                 if res.0.len() == 1{
-                    let pt_byte = res.0[0];
+                    let pt_byte = res.0[0] ^ (ct_block_left[blk_pos]^iv[blk_pos]);
                     pt_bytes_copy.lock().await[blk_pos] = pt_byte;
                     let _ = tx.send(Messages::ByteFound(pt_byte, blk_pos)).await;
                 }else if res.0.len() > 1{
@@ -176,13 +175,14 @@ pub async fn decrypt_intermediate_block(detector:&IntermediateDetector,bad_chars
     // was almost always 0xdd, idk why. 
     let single_bytes = calc_multi_to_single_bytes(multi_bytes.lock().await.to_vec());
     for (i, byte, _) in single_bytes{
-        pt_bytes_shared.lock().await[i] = byte;
+        pt_bytes_shared.lock().await[i] = byte ^ (ct_block_left[i] ^ iv[i]);
         let _ = tx.send(Messages::ByteFound(byte, i)).await;
     }
 
-    let almost_pt = pt_bytes_shared.lock().await.to_vec();
-    let xor_diff = ct_block_left.iter().zip(iv.iter()).map(|(b1, b2)| b1^b2).collect::<Vec<u8>>();
-    let pt = almost_pt.iter().zip(xor_diff.iter()).map(|(b1,b2)| b1 ^ b2).collect::<Vec<u8>>();
+    // let almost_pt = pt_bytes_shared.lock().await.to_vec();
+    // let xor_diff = ct_block_left.iter().zip(iv.iter()).map(|(b1, b2)| b1^b2).collect::<Vec<u8>>();
+    // let pt = almost_pt.iter().zip(xor_diff.iter()).map(|(b1,b2)| b1 ^ b2).collect::<Vec<u8>>();
+    let pt = pt_bytes_shared.lock().await.to_vec();
     return Ok((pt, valid_bytes_shared.lock().await.to_vec()))
 }
 
@@ -241,183 +241,185 @@ async fn _make_prime(detector: &IntermediateDetector, ct: &[u8],ct_prefix: &[u8]
     return None;
 }
 
+pub async fn build_cradle_simple(detector: &IntermediateDetector, cradle_block: &[u8], ct_prefix: &[u8], ct_suffix:&[u8], retry:u16) -> Result<(Vec<u8>, Vec<u8>), DecryptError>{
+    let blk_size = cradle_block.len();
+    let c1 = ct_prefix[ct_prefix.len()-blk_size..].to_vec();
+    let mut retry_counter = retry;
+    while retry_counter > 0 {
+        let c1_prime = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, Some(MakePrimeOptions{high_entropy: Some(true), fixed_blk_pos:None, valid_bytes:None})).await;
+        let c2_prime = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, Some(MakePrimeOptions{high_entropy: Some(true), fixed_blk_pos:None, valid_bytes:None})).await;
+        if let Some(c1_prime) = c1_prime && let Some(c2_prime) = c2_prime{
+            let test_ct = [ct_prefix, &c1_prime, cradle_block, &c1_prime, ct_suffix].concat();
+            let detect_res = detector.check(&test_ct).await;
+            if detect_res.is_ok_and(|d| d == DETECT::OUTLIER){
+                return Ok((c1_prime, c2_prime));
+            }
+        }
+        retry_counter = retry_counter - 1;
+    }
+    return Err(DecryptError::CradleBuildIssue("Could not find simple cradle".to_string()))
+}
+
 pub async fn build_cradle(detector: &IntermediateDetector, bad_chars: &[u8], cradle_block: &[u8], ct_prefix: &[u8], ct_suffix:&[u8], cache_opt: &mut Option<ComputeCache>, retry:u16) -> Result<(Vec<u8>, Vec<u8>), DecryptError>{
-let blk_size = cradle_block.len();
-// Find [c1’] such that [c1][c1’][c2][c3][c4] is valid
-let c1 = ct_prefix[ct_prefix.len()-blk_size..].to_vec();
-let mut c1_prime;
-let mut cache_used = false;
-let mut c2_prime = vec![];
+    let blk_size = cradle_block.len();
+    // Find [c1’] such that [c1][c1’][c2][c3][c4] is valid
+    let c1 = ct_prefix[ct_prefix.len()-blk_size..].to_vec();
+    let mut c1_prime;
+    let mut cache_used = false;
+    let mut c2_prime = vec![];
 
-if let Some(c) = cache_opt && c.c1_prime.len() > 0 && c.c2_prime.0.len() > 0 && detector.check(&[ct_prefix,&c.c1_prime, &c.c2_prime.0, ct_suffix].concat()).await.is_ok_and(|d| d== DETECT::OUTLIER){
-    c2_prime = c.c2_prime.0.clone();
-    c1_prime = c.c1_prime.clone();
-    cache_used = true;
-}else{
-    let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
-    if res.is_none(){
-        return Err(DecryptError::CradleBuildIssue("Could not find c1_prime".to_string()));
-    }
-    c1_prime = res.unwrap();
-}
-let mut fixed_pos = vec![];
-let mut byte_options = vec![];
-
-let cached_valid_bytes = match cache_opt {
-    Some(c) => c.valid_bytes.clone(),
-    None => vec![]
-};
-let valid_bytes = Arc::new(Mutex::new(cached_valid_bytes.clone()));
-loop {
-    println!("here");
-    //Find second [c1’] such that [c1][c1’][c1’][c2][c3][c4] is valid
-    let c2 = c1.clone();
-
-    //check cache for valid c2_prime before computing
-    if !cache_used {
-        // else find a new c2_prime and add it to the cache
-        let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime].concat(),ct_suffix, retry,None).await;
-        println!("c2_prime: {:?}", res);
+    if let Some(c) = cache_opt && c.c1_prime.len() > 0 && c.c2_prime.0.len() > 0 && detector.check(&[ct_prefix,&c.c1_prime, &c.c2_prime.0, ct_suffix].concat()).await.is_ok_and(|d| d== DETECT::OUTLIER){
+        c2_prime = c.c2_prime.0.clone();
+        c1_prime = c.c1_prime.clone();
+        cache_used = true;
+    }else{
+        let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
         if res.is_none(){
-            return Err(DecryptError::CradleBuildIssue("Could not find c2_prime".to_string()));;
+            return Err(DecryptError::CradleBuildIssue("Could not find c1_prime".to_string()));
         }
-        c2_prime = res.unwrap();
-        //add new cache entry if it has not been initialized
-        if let Some(c) = cache_opt && c.c2_prime.0.len() <= 0{
-            c.c2_prime = (c2_prime.clone(), vec![0u8;blk_size]);
-            c.c1_prime = c1_prime.clone();
-        }
-        println!("Found Valid c2_prime!");
+        c1_prime = res.unwrap();
     }
+    let mut fixed_pos = vec![];
+    let mut byte_options = vec![];
 
-    let found_intermediate_block_bytes = Arc::new(Mutex::new(vec![]));
-    let multi_bytes = Arc::new(Mutex::new(vec![]));
-    let mut futures_set = vec![];
-    // only decrypt bytes that need to be decrypted for insertion
-    for pos in (0..blk_size).filter(|p| !fixed_pos.contains(p)){
-        // copy everything for the async move
-        let valid_bytes = valid_bytes.clone();
-        let found_intermediate_block_bytes = found_intermediate_block_bytes.clone();
-        let c2_prime = c2_prime.clone();
-        let c1_prime = c1_prime.clone();
-        let (cached_c2_pt,cached_c2_ct) = match cache_opt {
-            Some(c) => (c.c2_prime.1.clone(), c.c2_prime.0.clone()),
-            None => (vec![], vec![])
-        };
-        let multi_bytes = multi_bytes.clone();
-        futures_set.push(async move{
-            //check if byte position is already decrypted
-            if cache_used && c2_prime == cached_c2_ct{
-                // skip computation and add cached value to list of found bytes
-                found_intermediate_block_bytes.lock().await.push((pos, cached_c2_pt[pos]));
-                println!("found intermediate block byte from cache: {:2x?}", cached_c2_pt[pos]);
-                // else decrypt the byte
-            } else if let Ok((satisfying_bytes, found_valid_bytes)) = calculate_byte(detector, pos, &bad_chars, &c1_prime, &c2_prime, ct_prefix, ct_suffix).await{
-                if satisfying_bytes.len() == 1{
-                    let byte = satisfying_bytes[0];
-                    let intermediate_block_byte = byte ^ c1_prime[pos];
-                    println!("found intermediate block byte: {:2x?}", intermediate_block_byte);
-                    found_intermediate_block_bytes.lock().await.push((pos, intermediate_block_byte));
-                }else if satisfying_bytes.len() > 1 {
-                    multi_bytes.lock().await.push((pos, satisfying_bytes, c1_prime[pos]));
+    let cached_valid_bytes = match cache_opt {
+        Some(c) => c.valid_bytes.clone(),
+        None => vec![]
+    };
+    let valid_bytes = Arc::new(Mutex::new(cached_valid_bytes.clone()));
+    loop {
+        //Find second [c1’] such that [c1][c1’][c1’][c2][c3][c4] is valid
+        let c2 = c1.clone();
+
+        //check cache for valid c2_prime before computing
+        if !cache_used {
+            // else find a new c2_prime and add it to the cache
+            let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime].concat(),ct_suffix, retry,None).await;
+            if res.is_none(){
+                return Err(DecryptError::CradleBuildIssue("Could not find c2_prime".to_string()));;
+            }
+            c2_prime = res.unwrap();
+            //add new cache entry if it has not been initialized
+            if let Some(c) = cache_opt && c.c2_prime.0.len() <= 0{
+                c.c2_prime = (c2_prime.clone(), vec![0u8;blk_size]);
+                c.c1_prime = c1_prime.clone();
+            }
+        }
+
+        let found_intermediate_block_bytes = Arc::new(Mutex::new(vec![]));
+        let multi_bytes = Arc::new(Mutex::new(vec![]));
+        let mut futures_set = vec![];
+        // only decrypt bytes that need to be decrypted for insertion
+        for pos in (0..blk_size).filter(|p| !fixed_pos.contains(p)){
+            // copy everything for the async move
+            let valid_bytes = valid_bytes.clone();
+            let found_intermediate_block_bytes = found_intermediate_block_bytes.clone();
+            let c2_prime = c2_prime.clone();
+            let c1_prime = c1_prime.clone();
+            let (cached_c2_pt,cached_c2_ct) = match cache_opt {
+                Some(c) => (c.c2_prime.1.clone(), c.c2_prime.0.clone()),
+                None => (vec![], vec![])
+            };
+            let multi_bytes = multi_bytes.clone();
+            futures_set.push(async move{
+                //check if byte position is already decrypted
+                if cache_used && c2_prime == cached_c2_ct{
+                    // skip computation and add cached value to list of found bytes
+                    found_intermediate_block_bytes.lock().await.push((pos, cached_c2_pt[pos]));
+                    // else decrypt the byte
+                } else if let Ok((satisfying_bytes, found_valid_bytes)) = calculate_byte(detector, pos, &bad_chars, &c1_prime, &c2_prime, ct_prefix, ct_suffix).await{
+                    if satisfying_bytes.len() == 1{
+                        let byte = satisfying_bytes[0];
+                        let intermediate_block_byte = byte ^ c1_prime[pos];
+                        found_intermediate_block_bytes.lock().await.push((pos, intermediate_block_byte));
+                    }else if satisfying_bytes.len() > 1 {
+                        multi_bytes.lock().await.push((pos, satisfying_bytes, c1_prime[pos]));
+                    }
+                    let mut valid_bytes = valid_bytes.lock().await;
+                    let valid_bytes_copy = valid_bytes.clone();
+                    valid_bytes.append(&mut found_valid_bytes.into_iter().filter(|v| !valid_bytes_copy.contains(v)).collect::<Vec<u8>>());
                 }
-                let mut valid_bytes = valid_bytes.lock().await;
-                let valid_bytes_copy = valid_bytes.clone();
-                valid_bytes.append(&mut found_valid_bytes.into_iter().filter(|v| !valid_bytes_copy.contains(v)).collect::<Vec<u8>>());
+            });
+        }
+        join_all(futures_set).await;
+
+        // find most commonly occurring byte. when the calculate byte functionality returned two satisfying bytes instead of one, the incorrect byte it returned
+        // was almost always 0xdd, idk why. 
+        let single_bytes = calc_multi_to_single_bytes(multi_bytes.lock().await.to_vec());
+        for entry in single_bytes{
+            found_intermediate_block_bytes.lock().await.push((entry.0, entry.1 ^ entry.2));
+        }
+
+        let found_intermediate_block_bytes = found_intermediate_block_bytes.lock().await.to_vec();
+        
+        // add plaintext bytes to finish initializing the cache
+        if let Some(c) = cache_opt && c.c2_prime.0 == c2_prime && !cache_used{
+            for (pos, byte) in found_intermediate_block_bytes.clone(){
+                c.c2_prime.1[pos] = byte;
             }
-        });
-    }
-    join_all(futures_set).await;
-
-    // find most commonly occurring byte. when the calculate byte functionality returned two satisfying bytes instead of one, the incorrect byte it returned
-    // was almost always 0xdd, idk why. 
-    let single_bytes = calc_multi_to_single_bytes(multi_bytes.lock().await.to_vec());
-    for entry in single_bytes{
-        found_intermediate_block_bytes.lock().await.push((entry.0, entry.1 ^ entry.2));
-    }
-
-    let found_intermediate_block_bytes = found_intermediate_block_bytes.lock().await.to_vec();
-    
-    // add plaintext bytes to finish initializing the cache
-    if let Some(c) = cache_opt && c.c2_prime.0 == c2_prime && !cache_used{
-        for (pos, byte) in found_intermediate_block_bytes.clone(){
-            c.c2_prime.1[pos] = byte;
         }
-        println!("wrote to cache: {:2x?} {:2x?}",c.c1_prime, c.c2_prime);
-        println!("check {:?}", detector.check(&[ct_prefix, &c.c1_prime, &c.c2_prime.0, ct_suffix].concat()).await)
-    }
 
-    let valid_bytes = valid_bytes.lock().await.to_vec();
-    for (pos, byte) in found_intermediate_block_bytes{
-        // if inserting cradle block byte into c1_prime at pos would create a valid byte, then do it
-        if valid_bytes.contains(&(byte ^ cradle_block[pos])){
-            c1_prime[pos] = cradle_block[pos];
-            fixed_pos.push(pos);
-        }else{
-            byte_options.push((pos, valid_bytes.iter().map(|v| *v ^ byte).collect::<Vec<u8>>()));
-        }
-    }
-    // if we're not finished and we have some unfixed bytes in c1_prime, find a c1_prime that's valid
-    if !c1_prime.eq(cradle_block){
-        let mut success = false;
-        while !success && fixed_pos.len() > 0{
-            if let Some(res) = _make_prime(detector, &c1_prime, ct_prefix, &[&c2_prime, ct_suffix].concat(), retry, Some(MakePrimeOptions { high_entropy: None, fixed_blk_pos: Some(fixed_pos.clone()), valid_bytes: Some(byte_options.clone()) })).await{
-                c1_prime = res;
-                println!("found new c1_prime: {:2x?}", c1_prime);
-                success = true;
-            // try high entropy if valid bytes approach fails
-            }else if let Some(res) = _make_prime(detector, &c1_prime, ct_prefix, &[&c2_prime, ct_suffix].concat(), retry, Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: Some(fixed_pos.clone()), valid_bytes: None })).await{
-                c1_prime = res;
-                println!("found new c1_prime high_entropy: {:2x?}", c1_prime);
-                success = true;
+        let valid_bytes = valid_bytes.lock().await.to_vec();
+        for (pos, byte) in found_intermediate_block_bytes{
+            // if inserting cradle block byte into c1_prime at pos would create a valid byte, then do it
+            if valid_bytes.contains(&(byte ^ cradle_block[pos])){
+                c1_prime[pos] = cradle_block[pos];
+                fixed_pos.push(pos);
             }else{
-                println!("c1 and c2 prime: {:2x?} {:2x?}", c1_prime, c2_prime);
-                println!("c1 and c2 prime: {:2x?} {:2x?} {:2x?}", cache_opt.as_ref().unwrap().c1_prime, cache_opt.as_ref().unwrap().c2_prime.0, cache_opt.as_ref().unwrap().c2_prime.1);
-                println!("check {:?}",detector.check(&[ct_prefix,&c1_prime,&c2_prime,ct_suffix].concat()).await);
-                println!("could not find new valid c1_prime, backing off fixed positions {}", fixed_pos.len());
-                fixed_pos = fixed_pos[..fixed_pos.len()-1].to_vec()
+                byte_options.push((pos, valid_bytes.iter().map(|v| *v ^ byte).collect::<Vec<u8>>()));
             }
         }
-    }
-    println!("c1_prime: {:2x?}", c1_prime);
-    println!("cradle__: {:2x?}", cradle_block);
-    cache_used = false;
+        // if we're not finished and we have some unfixed bytes in c1_prime, find a c1_prime that's valid
+        if !c1_prime.eq(cradle_block){
+            let mut success = false;
+            while !success && fixed_pos.len() > 0{
+                if let Some(res) = _make_prime(detector, &c1_prime, ct_prefix, &[&c2_prime, ct_suffix].concat(), retry, Some(MakePrimeOptions { high_entropy: None, fixed_blk_pos: Some(fixed_pos.clone()), valid_bytes: Some(byte_options.clone()) })).await{
+                    c1_prime = res;
+                    success = true;
+                // try high entropy if valid bytes approach fails
+                }else if let Some(res) = _make_prime(detector, &c1_prime, ct_prefix, &[&c2_prime, ct_suffix].concat(), retry, Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: Some(fixed_pos.clone()), valid_bytes: None })).await{
+                    c1_prime = res;
+                    success = true;
+                }else{
+                    fixed_pos = fixed_pos[..fixed_pos.len()-1].to_vec()
+                }
+            }
+        }
+        cache_used = false;
 
-    if c1_prime.eq(cradle_block){
-        break;
-    }
-}
-
-println!("finishing cradle");
-
-//build a list of multiple c1_primes
-let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
-if res.is_none(){
-    return Err(DecryptError::CradleBuildIssue("Could not find c1_prime while finishing cradle".to_string()));
-}
-let c1_prime_init = res.unwrap();
-
-let c2 = c1.clone();
-let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime_init].concat(),ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
-if res.is_none(){
-    return Err(DecryptError::CradleBuildIssue("Could not find c2_prime while finishing cradle".to_string()));
-}
-let c2_prime_init = res.unwrap();
-
-//let futures_set = vec![];
-let mut valid_prime;
-loop{
-    if let Some(v) = _make_prime(detector, &c1_prime_init, ct_prefix, &[&c2_prime_init, ct_suffix].concat(), retry,Some(MakePrimeOptions{high_entropy:Some(true), fixed_blk_pos:None, valid_bytes:None})).await{
-        valid_prime = v;
-        if detector.check(&[ct_prefix, &valid_prime, &c1_prime, &c2_prime, ct_suffix].concat()).await.is_ok_and(|d| d == DETECT::OUTLIER){
+        if c1_prime.eq(cradle_block){
             break;
         }
     }
-}
-// update cached valid bytes
-if let Some(c) = cache_opt{
-    c.valid_bytes = valid_bytes.lock().await.to_vec();
-}
-println!("found cradle: {:?}", (valid_prime.clone(), c2_prime.clone()));
-return Ok((valid_prime, c2_prime))
+
+
+    //build a list of multiple c1_primes
+    let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
+    if res.is_none(){
+        return Err(DecryptError::CradleBuildIssue("Could not find c1_prime while finishing cradle".to_string()));
+    }
+    let c1_prime_init = res.unwrap();
+
+    let c2 = c1.clone();
+    let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime_init].concat(),ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
+    if res.is_none(){
+        return Err(DecryptError::CradleBuildIssue("Could not find c2_prime while finishing cradle".to_string()));
+    }
+    let c2_prime_init = res.unwrap();
+
+    //let futures_set = vec![];
+    let mut valid_prime;
+    loop{
+        if let Some(v) = _make_prime(detector, &c1_prime_init, ct_prefix, &[&c2_prime_init, ct_suffix].concat(), retry,Some(MakePrimeOptions{high_entropy:Some(true), fixed_blk_pos:None, valid_bytes:None})).await{
+            valid_prime = v;
+            if detector.check(&[ct_prefix, &valid_prime, &c1_prime, &c2_prime, ct_suffix].concat()).await.is_ok_and(|d| d == DETECT::OUTLIER){
+                break;
+            }
+        }
+    }
+    // update cached valid bytes
+    if let Some(c) = cache_opt{
+        c.valid_bytes = valid_bytes.lock().await.to_vec();
+    }
+    return Ok((valid_prime, c2_prime))
 }

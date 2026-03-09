@@ -95,6 +95,7 @@ async fn loop_with_retry<T, E>(
 }
 
 pub async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
+    ct_prefix: Vec<u8>,
     ct_block: Vec<u8>,
     detector: Arc<D>,
     retry: u8,
@@ -127,6 +128,7 @@ pub async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
             let success = success_shared.clone();
             let tx = tx.clone();
             let cancellation_token = cancellation_token.clone();
+            let ct_prefix = ct_prefix.clone();
             futures_set.push(async move {
                 // mark if we're actually updating this byte
                 let changed_byte = iv_copy[i as usize] != j;
@@ -134,11 +136,11 @@ pub async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
                 if !success.load(Ordering::SeqCst)
                     && let Ok(response) = detector
                         .check(
-                            &iv_copy
+                            &[ct_prefix,iv_copy
                                 .iter()
                                 .chain(&ct_block)
                                 .cloned()
-                                .collect::<Vec<u8>>(),
+                                .collect::<Vec<u8>>()].concat(),
                         )
                         .await
                 {

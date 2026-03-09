@@ -26,6 +26,7 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct HTTPTransport {
     pub(crate) url: String,
     pub(crate) headers: Vec<(String, String)>,
@@ -93,18 +94,17 @@ impl Transport for HTTPTransport {
 
         // loop with retry for timeout
         if let Some(err) = response.as_ref().err() && err.is_timeout(){
-            println!("timeout, retrying");
-            for _ in 0..4{
+            for _ in 0..10{
                 response = req.try_clone().unwrap().send().await;
                 if response.is_ok(){
                     break;
                 }else if let Some(err) = response.as_ref().err() && !err.is_timeout() {
-                    return err.to_string();
+                    return String::from("no match");
                 }
             }
         }
         if let Some(err) = response.as_ref().err(){
-            return err.to_string();
+            return String::from("no match");
         }
         let response = response.unwrap();
         let mut response_text = String::new();
@@ -126,7 +126,6 @@ impl Transport for HTTPTransport {
             .await
             .expect("Error: could not convert response body to text");
         response_text += &response_body;
-
         if let Some(search) = &self.search_pat {
             return match search.find(&response_text) {
                 Some(_) => String::from("matches"),
