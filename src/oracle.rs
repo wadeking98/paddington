@@ -112,7 +112,7 @@ impl Oracle for IntermediateOracle{
                         Box::new(move |msg| match msg {
                             Messages::ByteFound(zero_byte, pos) => {
                                 let byte = zero_byte;
-                                return Messages::ByteFound(byte, i * block_size + pos);
+                                return Messages::ByteFound(byte, (i-1) * block_size + pos);
                             }
                             other => other,
                         }),

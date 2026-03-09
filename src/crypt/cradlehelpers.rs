@@ -296,7 +296,7 @@ pub async fn build_cradle(detector: &IntermediateDetector, bad_chars: &[u8], cra
             // else find a new c2_prime and add it to the cache
             let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime].concat(),ct_suffix, retry,None).await;
             if res.is_none(){
-                return Err(DecryptError::CradleBuildIssue("Could not find c2_prime".to_string()));;
+                return Err(DecryptError::CradleBuildIssue("Could not find c2_prime".to_string()));
             }
             c2_prime = res.unwrap();
             //add new cache entry if it has not been initialized
