@@ -54,12 +54,15 @@ Options:
                                  "-e b64" to base64 decode [default: b64] [possible values: hex, b64, b64-url, url]
   -t, --threads <THREADS>        the number of threads to use [default: 10]
   -f, --forge <FORGE>            the plaintext to forge
-  -b, --block-size <BLOCK_SIZE>  the block size to use (small = 8) (med = 16) (large = 32) [default: MED] [possible values: small, med, large]
+  -b, --block-size <BLOCK_SIZE>  the block size to use (small = 8) (med = 16) (large = 32) [default: AUTO] [possible values: small, med, large, auto]
   -s, --search-pat <SEARCH_PAT>  the search string to match a response with valid padding
       --proxy <PROXY>            the proxy to use
   -c, --ciphertext <CIPHERTEXT>  override the ciphertext to use
+  -i, --iv <IV>                  add a prefix to the ciphertext (IV) encoded the same way as the ciphertext
   -a, --attack <ATTACK>          the attack type to use, (single = standard attack) (double = double ciphertext attack) 
-                                 (inter = intermediate ciphertext attack, not implemented yet) [default: ALL] [possible values: double, single, inter, all]
+                                 (inter = intermediate ciphertext attack) [default: ALL] [possible values: double, single, inter, all]
+  -r, --retry <RETRY>            number of times to retry when no valid byte found [default: 5]
+      --bad-chars <BAD_CHARS>    known bad characters used for intermediate oracle. You don't need to list all invalid bytes for the attack to work, only a few are needed. The default configuration is best for JSON on Node, PHP, etc. The intermediate oracle doesn't work great for most Python apps at the moment. add bad bytes like so '\x00\x01\x02"\xff}{[]!'
   -h, --help                     Print help
   -V, --version                  Print version
 ```
