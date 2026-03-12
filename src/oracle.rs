@@ -77,18 +77,31 @@ impl Oracle for IntermediateOracle{
         let mut futures_set = vec![];
         let pt_buffer = Arc::new(Mutex::new(vec![vec![0u8;self.block_size];chunks.len()-1]));
         let block_size = self.block_size;
+        let simple_cradles = Arc::new(Mutex::new(vec![None;chunks.len()-1]));
+        let mut simple_cradle_futures = vec![];
+        for i in 1..chunks.len(){
+            let simple_cradles= simple_cradles.clone();
+            let block_for_decryption = chunks[i].clone();
+            let detector = self.detector.clone();
+            let tx = self.tx.clone();
+            simple_cradle_futures.push(async move{
+                if let Ok(res) = build_cradle_simple(&detector, &block_for_decryption, &detector.block_prefix, &detector.block_suffix, 50).await{
+                    simple_cradles.lock().await[i-1] = Some(res);
+                    let _ = tx.send(Messages::FoundCradle).await;
+                }
+            });
+        }
+        join_all(simple_cradle_futures).await;
+        let mut found_first_complex_cradle = false;
         for i in 1..chunks.len(){
             let iv = &chunks[i-1];
             let block_for_decryption = &chunks[i];
-            let mut cradle = None;
-            if i == 1{
-                // println!("trying simple cradle");
-                // if let Ok(res) = build_cradle_simple(&self.detector, &block_for_decryption, &self.detector.block_prefix, &self.detector.block_suffix, 50).await{
-                //     cradle = Some(res);
-                // }else{
-                //     println!("trying complex cradle");
-                    cradle = Some(build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 1000).await?);
-                //}                
+            let mut cradle = simple_cradles.lock().await[i-1].clone();
+            let found_from_simple_cradle = cradle.is_some();
+
+            if !found_first_complex_cradle && cradle.is_none(){
+                cradle = Some(build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 1000).await?);
+                found_first_complex_cradle = true;
             }
             let mut cradle = cradle.clone();
             let bad_chars = self.bad_chars.clone();
@@ -97,13 +110,7 @@ impl Oracle for IntermediateOracle{
             let pt_buffer = pt_buffer.clone();
             futures_set.push(async move{
                 if cradle.is_none(){
-                    // println!("trying simple cradle");
-                    // if let Ok(res) = build_cradle_simple(&detector, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, 50).await{
-                    //     cradle = Some(res);
-                    // }else{
-                    //     println!("trying complex cradle");
-                        cradle = build_cradle(&detector,&bad_chars, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, &mut cache, 1000).await.ok();
-                    //}
+                    cradle = build_cradle(&detector,&bad_chars, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, &mut cache, 1000).await.ok();
                 }
                 if let Some(cradle) = cradle {
 
@@ -118,7 +125,10 @@ impl Oracle for IntermediateOracle{
                         }),
                     );
 
-                    let _ = msg_forwarder.local_tx.send(Messages::FoundCradle).await;
+                    // if the cradle is from the simple cradle, then the message has already been  sent
+                    if !found_from_simple_cradle{
+                        let _ = msg_forwarder.local_tx.send(Messages::FoundCradle).await;
+                    }
                     let (pt, _) = decrypt_intermediate_block(&detector, &bad_chars, iv, &cradle.0, block_for_decryption, &detector.block_prefix, &[cradle.1, detector.block_suffix.clone()].concat(), self.block_size, msg_forwarder.local_tx.clone()).await.unwrap();
                     let mut pt_buff = pt_buffer.lock().await;
                     pt_buff[i-1] = pt;

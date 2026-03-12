@@ -246,16 +246,19 @@ pub async fn build_cradle_simple(detector: &IntermediateDetector, cradle_block: 
     let c1 = ct_prefix[ct_prefix.len()-blk_size..].to_vec();
     let mut retry_counter = retry;
     while retry_counter > 0 {
-        let c1_prime = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, Some(MakePrimeOptions{high_entropy: Some(true), fixed_blk_pos:None, valid_bytes:None})).await;
-        let c2_prime = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, Some(MakePrimeOptions{high_entropy: Some(true), fixed_blk_pos:None, valid_bytes:None})).await;
-        if let Some(c1_prime) = c1_prime && let Some(c2_prime) = c2_prime{
-            let test_ct = [ct_prefix, &c1_prime, cradle_block, &c1_prime, ct_suffix].concat();
-            let detect_res = detector.check(&test_ct).await;
-            if detect_res.is_ok_and(|d| d == DETECT::OUTLIER){
-                return Ok((c1_prime, c2_prime));
+        let c1_prime = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, None).await;
+        if let Some(c1_prime) = c1_prime{
+            let c2_prime = _make_prime(detector, &c1, ct_prefix, &[c1_prime.clone(),ct_suffix.to_vec()].concat(), retry, Some(MakePrimeOptions{high_entropy: Some(true), fixed_blk_pos:None, valid_bytes:None})).await;
+            if let Some(c2_prime) = c2_prime{
+                let test_ct = [ct_prefix, &c2_prime, cradle_block, &c1_prime, ct_suffix].concat();
+                let detect_res = detector.check(&test_ct).await;
+                if detect_res.is_ok_and(|d| d == DETECT::OUTLIER){
+                    return Ok((c1_prime, c2_prime));
+                }else{
+                    retry_counter = retry_counter - 1;
+                }
             }
         }
-        retry_counter = retry_counter - 1;
     }
     return Err(DecryptError::CradleBuildIssue("Could not find simple cradle".to_string()))
 }
@@ -273,7 +276,7 @@ pub async fn build_cradle(detector: &IntermediateDetector, bad_chars: &[u8], cra
         c1_prime = c.c1_prime.clone();
         cache_used = true;
     }else{
-        let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
+        let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,None).await;
         if res.is_none(){
             return Err(DecryptError::CradleBuildIssue("Could not find c1_prime".to_string()));
         }
@@ -288,7 +291,7 @@ pub async fn build_cradle(detector: &IntermediateDetector, bad_chars: &[u8], cra
     };
     let valid_bytes = Arc::new(Mutex::new(cached_valid_bytes.clone()));
     loop {
-        //Find second [c1’] such that [c1][c1’][c1’][c2][c3][c4] is valid
+        //Find second c1_prime such that [c1][c1''][c1'][c2][c3][c4] is valid
         let c2 = c1.clone();
 
         //check cache for valid c2_prime before computing
@@ -394,14 +397,14 @@ pub async fn build_cradle(detector: &IntermediateDetector, bad_chars: &[u8], cra
 
 
     //build a list of multiple c1_primes
-    let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
+    let res = _make_prime(detector, &c1,ct_prefix, ct_suffix, retry,None).await;
     if res.is_none(){
         return Err(DecryptError::CradleBuildIssue("Could not find c1_prime while finishing cradle".to_string()));
     }
     let c1_prime_init = res.unwrap();
 
     let c2 = c1.clone();
-    let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime_init].concat(),ct_suffix, retry,Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: None, valid_bytes: None })).await;
+    let res = _make_prime(detector, &c2,&[ct_prefix, &c1_prime_init].concat(),ct_suffix, retry,None).await;
     if res.is_none(){
         return Err(DecryptError::CradleBuildIssue("Could not find c2_prime while finishing cradle".to_string()));
     }
