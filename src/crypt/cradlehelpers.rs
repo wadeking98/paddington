@@ -246,11 +246,11 @@ pub async fn build_cradle_simple(detector: &IntermediateDetector, cradle_block: 
     let c1 = ct_prefix[ct_prefix.len()-blk_size..].to_vec();
     let mut retry_counter = retry;
     while retry_counter > 0 {
-        let c1_prime = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, None).await;
-        if let Some(c1_prime) = c1_prime{
-            let c2_prime = _make_prime(detector, &c1, ct_prefix, &[c1_prime.clone(),ct_suffix.to_vec()].concat(), retry, Some(MakePrimeOptions{high_entropy: Some(true), fixed_blk_pos:None, valid_bytes:None})).await;
-            if let Some(c2_prime) = c2_prime{
-                let test_ct = [ct_prefix, &c2_prime, cradle_block, &c1_prime, ct_suffix].concat();
+        let c2_prime = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, None).await;
+        if let Some(c2_prime) = c2_prime{
+            let c1_prime = _make_prime(detector, &c1, ct_prefix, &[c2_prime.clone(),ct_suffix.to_vec()].concat(), retry, Some(MakePrimeOptions{high_entropy: Some(true), fixed_blk_pos:None, valid_bytes:None})).await;
+            if let Some(c1_prime) = c1_prime{
+                let test_ct = [ct_prefix, &c1_prime, cradle_block, &c2_prime, ct_suffix].concat();
                 let detect_res = detector.check(&test_ct).await;
                 if detect_res.is_ok_and(|d| d == DETECT::OUTLIER){
                     return Ok((c1_prime, c2_prime));

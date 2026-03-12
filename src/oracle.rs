@@ -86,7 +86,7 @@ impl Oracle for IntermediateOracle{
             let tx = self.tx.clone();
             simple_cradle_futures.push(async move{
                 if let Ok(res) = build_cradle_simple(&detector, &block_for_decryption, &detector.block_prefix, &detector.block_suffix, 50).await{
-                    simple_cradles.lock().await[i-1] = Some(res);
+                    simple_cradles.lock().await[i-1] = Some(res.clone());
                     let _ = tx.send(Messages::FoundCradle).await;
                 }
             });
