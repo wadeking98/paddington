@@ -17,7 +17,7 @@ use crate::helper::Messages;
 pub fn fmt_bytes_custom(bytes: &[u8]) -> String {
     let mut base = String::new();
     for &byte in bytes {
-        if byte.is_ascii_graphic() || byte.is_ascii_whitespace() {
+        if byte.is_ascii_graphic() || byte == 32 {
             // Cast to char for printing as a character
             base += format!("{}", byte as char).as_str();
         } else {

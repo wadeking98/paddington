@@ -1,13 +1,14 @@
 
-use std::{io::{self, Write}, time::Duration};
+use std::{io::{self, Write}, process::exit, time::Duration};
 
 use clap::{Parser, ValueEnum};
 use futures::future::join_all;
+use regex::Regex;
 use strum_macros::Display;
 use tokio::{sync::mpsc, time::sleep};
 
 use reqwest::{ Method};
-use crate::{crypt::{cradlehelpers::{ComputeCache, build_cradle, decrypt_intermediate_block}, detector::{Detector, IntermediateDetector, SimpleDetector}}, helper::{Config, Encoding, decode_ct, encode_ct, parse_bad_chars}, oracle::{DoubleOracle, IntermediateOracle, Oracle, SingleOracle}, print::{fmt_bytes_custom, progress_bar}, transport::HTTPTransport};
+use crate::{crypt::{cradlehelpers::{ComputeCache, build_cradle, decrypt_intermediate_block}, detector::{Detector, IntermediateDetector, SimpleDetector, find_baseline_response}}, helper::{Config, Encoding, decode_ct, encode_ct, parse_bad_chars}, oracle::{DoubleOracle, IntermediateOracle, Oracle, SingleOracle}, print::{fmt_bytes_custom, progress_bar}, transport::HTTPTransport};
 
 pub mod crypt;
 pub mod errors;
@@ -124,7 +125,18 @@ async fn main() {
         config.set("blk_size".to_string(), (*block_size).to_string());
         config.set("threads".to_string(), args.threads.to_string());
         config.set("retry".to_string(), args.retry.to_string());
-
+        // handle search pattern regular expression
+        let search_pat;
+        if let Some(pat) = args.search_pat{
+            if let Ok(reg) = Regex::new(&pat){
+                search_pat = Some(reg);
+            }else{
+                println!("Error, invalid search pattern {}", pat);
+                return;
+            }
+        }else{
+            search_pat = None;
+        }
         let mut headers: Vec<(String, String)> = vec![];
         for header in &args.headers {
             let header_parts = header.split(':').map(String::from).collect::<Vec<String>>();
@@ -142,10 +154,17 @@ async fn main() {
             args.data.clone(),
             encoding.clone(),
             args.params.clone(),
-            args.search_pat.clone(),
             args.proxy.clone(),
         ));
         let standard_ct = standard_transport.base_ct.clone();
+        let ciphertext;
+        if let Some(ref ct) = args.ciphertext{
+            ciphertext = decode_ct(ct.clone(), args.encoding);
+        }else{
+            ciphertext = standard_ct.clone();
+        }
+
+        let baseline = find_baseline_response(&standard_ct, standard_transport.clone(), search_pat.clone()).await.ok();
 
         // find ct_len for the progress bar
         let mut ct_len = standard_ct.len() - *block_size as usize;
@@ -161,7 +180,7 @@ async fn main() {
         }
 
         if args.attack == Attack::ALL || args.attack == Attack::SINGLE{
-            let detect = SimpleDetector::init(None, &standard_ct, standard_transport.clone(), *block_size as usize, args.threads).await;
+            let detect = SimpleDetector::init(None, &standard_ct, standard_transport.clone(), *block_size as usize, args.threads, baseline.clone(),search_pat.clone()).await;
             if let Ok(detector) = detect{
                 println!("Standard Oracle Detected");
                 let (tx, rx) = mpsc::channel(255);
@@ -175,7 +194,7 @@ async fn main() {
                         return;
                     }
                 }else{
-                    let pt = oracle.decrypt(&standard_ct).await;
+                    let pt = oracle.decrypt(&ciphertext).await;
                     if let Ok(pt) = pt{
                         close_progress();
                         println!("plaintext {:?}", fmt_bytes_custom(&pt));
@@ -188,7 +207,7 @@ async fn main() {
         }
 
         if args.attack == Attack::ALL || args.attack == Attack::DOUBLE{
-            let detect = SimpleDetector::init(Some(standard_ct.clone()), &standard_ct, standard_transport.clone(), *block_size as usize, args.threads).await;
+            let detect = SimpleDetector::init(Some(standard_ct.clone()), &standard_ct, standard_transport.clone(), *block_size as usize, args.threads,baseline.clone(), search_pat.clone()).await;
             if let Ok(detector) = detect{
                 println!("Double Oracle Detected");
                 let (tx, rx) = mpsc::channel(255);
@@ -202,7 +221,7 @@ async fn main() {
                         return;
                     }
                 }else{
-                    let pt = double_oracle.decrypt(&standard_ct).await;
+                    let pt = double_oracle.decrypt(&ciphertext).await;
                     if let Ok(pt) = pt{
                         close_progress();
                         println!("plaintext {:?}", fmt_bytes_custom(&pt));
@@ -215,7 +234,7 @@ async fn main() {
         }
 
         if args.attack == Attack::ALL || args.attack == Attack::INTER{
-            let detect = IntermediateDetector::init(&standard_ct, standard_transport, *block_size as usize, args.threads).await;
+            let detect = IntermediateDetector::init(&standard_ct, standard_transport, *block_size as usize, args.threads,baseline.clone(), search_pat.clone()).await;
             if let Ok(detector) = detect{
                 println!("Intermediate Oracle Detected");
                 let bad_chars = parse_bad_chars(args.bad_chars);
@@ -230,7 +249,7 @@ async fn main() {
                         return;
                     }
                 }else{
-                    let pt = intermediate_oracle.decrypt(&standard_ct).await;
+                    let pt = intermediate_oracle.decrypt(&ciphertext).await;
                     if let Ok(pt) = pt{
                         close_progress();
                         println!("plaintext {:?}", fmt_bytes_custom(&pt));

@@ -1,27 +1,27 @@
-use std::{sync::Arc, time::Duration};
+use std::{error::Error, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use regex::{Regex, RegexBuilder};
-use reqwest::{Client, Method, Proxy, redirect::Policy};
+use reqwest::{Client, Error as ReqError, Method, Proxy, redirect::Policy};
 
 use crate::helper::{Encoding, decode_ct, encode_ct, set_injection_points};
 
 
 #[async_trait]
 pub trait Transport: 'static + Send + Sync {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String;
+    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> Result<String, Box<dyn Error + Send>>;
 }
 
 #[async_trait]
 impl<T: Transport> Transport for Arc<T> {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String {
+    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> Result<String, Box<dyn Error + Send>> {
         self.as_ref().exec(ct, ct_prefix, ct_suffix).await
     }
 }
 
 #[async_trait]
 impl<T: Transport + ?Sized> Transport for Box<T> {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String {
+    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> Result<String, Box<dyn Error + Send>> {
         self.as_ref().exec(ct, ct_prefix, ct_suffix).await
     }
 }
@@ -34,14 +34,13 @@ pub struct HTTPTransport {
     pub(crate) data: Option<String>,
     encoding: Vec<Encoding>,
     pub(crate) params: Vec<String>,
-    search_pat: Option<Regex>,
     pub(crate) base_ct: Vec<u8>,
     proxy: Option<Proxy>,
 }
 
 #[async_trait]
 impl Transport for HTTPTransport {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> String {
+    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> Result<String, Box<dyn Error + Send>> {
         let ct_prefix = ct_prefix.unwrap_or(vec![]);
         let ct_suffix = ct_suffix.unwrap_or(vec![]);
         let ct = [ct_prefix.as_slice(), ct, ct_suffix.as_slice()].concat();
@@ -93,18 +92,19 @@ impl Transport for HTTPTransport {
         let mut response = req.try_clone().unwrap().send().await;
 
         // loop with retry for timeout
-        if let Some(err) = response.as_ref().err() && err.is_timeout(){
+        if response.is_err() && response.as_ref().err().unwrap().is_timeout(){
             for _ in 0..10{
-                response = req.try_clone().unwrap().send().await;
-                if response.is_ok(){
+                let retry_response = req.try_clone().unwrap().send().await;
+                if retry_response.is_ok(){
+                    response = retry_response;
                     break;
-                }else if let Some(err) = response.as_ref().err() && !err.is_timeout() {
-                    return String::from("no match");
+                }else if let Some(err) = retry_response.err() && !err.is_timeout() {
+                    return Err(Box::new(err));
                 }
             }
         }
-        if let Some(err) = response.as_ref().err(){
-            return String::from("no match");
+        if response.is_err(){
+            return Err(Box::new(response.err().unwrap()));
         }
         let response = response.unwrap();
         let mut response_text = String::new();
@@ -126,13 +126,13 @@ impl Transport for HTTPTransport {
             .await
             .expect("Error: could not convert response body to text");
         response_text += &response_body;
-        if let Some(search) = &self.search_pat {
-            return match search.find(&response_text) {
-                Some(_) => String::from("matches"),
-                None => String::from("no match"),
-            };
-        }
-        return response_text;
+        // if let Some(search) = &self.search_pat {
+        //     return match search.find(&response_text) {
+        //         Some(_) => String::from("matches"),
+        //         None => String::from("no match"),
+        //     };
+        // }
+        return Ok(response_text);
     }
 }
 
@@ -144,17 +144,16 @@ impl HTTPTransport {
         data: Option<String>,
         encoding: Vec<Encoding>,
         params: Vec<String>,
-        search_pat: Option<String>,
         proxy: Option<String>,
     ) -> Self {
-        let mut pat = None;
-        if let Some(search_pat) = search_pat {
-            let re = RegexBuilder::new(&search_pat)
-                .multi_line(true)
-                .build()
-                .expect(&("Error: Failed to compile regex ".to_owned() + &search_pat));
-            pat = Some(re);
-        }
+        // let mut pat = None;
+        // if let Some(search_pat) = search_pat {
+        //     let re = RegexBuilder::new(&search_pat)
+        //         .multi_line(true)
+        //         .build()
+        //         .expect(&("Error: Failed to compile regex ".to_owned() + &search_pat));
+        //     pat = Some(re);
+        // }
         let mut prox = None;
         if let Some(p) = proxy {
             prox = Some(Proxy::all(p).expect("Error: Invalid proxy"));
@@ -166,7 +165,6 @@ impl HTTPTransport {
             data,
             encoding,
             params,
-            search_pat: pat,
             base_ct: vec![],
             proxy: prox,
         };

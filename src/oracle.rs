@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use futures::future::join_all;
-use tokio::sync::{Mutex, mpsc::Sender};
+use futures::{future::join_all, lock::Mutex};
+use tokio::sync::{mpsc::Sender};
 
 use crate::{crypt::{MessageForwarder, cradlehelpers::{ComputeCache, build_cradle, build_cradle_simple, decrypt_intermediate_block}, decrypt::_padding_decrypt, detector::{Detector, IntermediateDetector}, forge::_padding_forge}, errors::DecryptError, helper::Messages};
 
@@ -79,28 +79,31 @@ impl Oracle for IntermediateOracle{
         let block_size = self.block_size;
         let simple_cradles = Arc::new(Mutex::new(vec![None;chunks.len()-1]));
         let mut simple_cradle_futures = vec![];
+        let prime_cache = Arc::new(Mutex::new(HashMap::new()));
         for i in 1..chunks.len(){
             let simple_cradles= simple_cradles.clone();
             let block_for_decryption = chunks[i].clone();
             let detector = self.detector.clone();
             let tx = self.tx.clone();
+            let prime_cache = prime_cache.clone();
             simple_cradle_futures.push(async move{
-                if let Ok(res) = build_cradle_simple(&detector, &block_for_decryption, &detector.block_prefix, &detector.block_suffix, 50).await{
+                if let Ok(res) = build_cradle_simple(&detector, &block_for_decryption, &detector.block_prefix, &detector.block_suffix, 100, Some(prime_cache)).await{
                     simple_cradles.lock().await[i-1] = Some(res.clone());
                     let _ = tx.send(Messages::FoundCradle).await;
                 }
             });
         }
         join_all(simple_cradle_futures).await;
+        let simple_cradles = simple_cradles.lock().await.clone();
         let mut found_first_complex_cradle = false;
         for i in 1..chunks.len(){
             let iv = &chunks[i-1];
             let block_for_decryption = &chunks[i];
-            let mut cradle = simple_cradles.lock().await[i-1].clone();
+            let mut cradle = simple_cradles[i-1].clone();
             let found_from_simple_cradle = cradle.is_some();
 
             if !found_first_complex_cradle && cradle.is_none(){
-                cradle = Some(build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 1000).await?);
+                cradle = Some(build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 1000, Some(prime_cache.clone())).await?);
                 found_first_complex_cradle = true;
             }
             let mut cradle = cradle.clone();
@@ -108,9 +111,10 @@ impl Oracle for IntermediateOracle{
             let mut cache = cache.clone();
             let detector = self.detector.clone();
             let pt_buffer = pt_buffer.clone();
+            let prime_cache = prime_cache.clone();
             futures_set.push(async move{
                 if cradle.is_none(){
-                    cradle = build_cradle(&detector,&bad_chars, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, &mut cache, 1000).await.ok();
+                    cradle = build_cradle(&detector,&bad_chars, &block_for_decryption,&detector.block_prefix, &detector.block_suffix, &mut cache, 1000, Some(prime_cache)).await.ok();
                 }
                 if let Some(cradle) = cradle {
 
@@ -155,6 +159,7 @@ impl Oracle for IntermediateOracle{
         // this can be anything to start off with
         let mut block_for_decryption = ct.to_vec().chunks(self.block_size).map(|c|c.to_vec()).collect::<Vec<Vec<u8>>>()[0].clone();
         let mut ct_buffer = block_for_decryption.clone();
+        let prime_cache = Arc::new(Mutex::new(HashMap::new()));
         for i in (0..chunks.len()).rev(){
              let msg_forwarder = MessageForwarder::new(
                 self.tx.clone(),
@@ -166,13 +171,14 @@ impl Oracle for IntermediateOracle{
                     other => other,
                 }),
             );
-            let cradle = build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 1000).await?;
+            let cradle = build_cradle_simple(&self.detector, &block_for_decryption, &self.detector.block_prefix, &self.detector.block_suffix, 100, Some(prime_cache.clone())).await;
+            let cradle = cradle.unwrap_or(build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 1000, Some(prime_cache.clone())).await?);
             let _ = msg_forwarder.local_tx.send(Messages::FoundCradle).await;
             let (pt, _) = decrypt_intermediate_block(&self.detector, &self.bad_chars, &vec![0u8;self.block_size], &cradle.0, &block_for_decryption, &self.detector.block_prefix, &[cradle.1, self.detector.block_suffix.clone()].concat(), self.block_size, msg_forwarder.local_tx.clone()).await.unwrap();
             block_for_decryption = pt.iter().zip(chunks[i].clone()).map(|(x,y)|x^y).collect::<Vec<u8>>();
             ct_buffer = [block_for_decryption.clone(),ct_buffer].concat();
         }
-        let cradle = build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 1000).await?;
+        let cradle = build_cradle(&self.detector,&self.bad_chars, &block_for_decryption,&self.detector.block_prefix, &self.detector.block_suffix, &mut cache, 1000, Some(prime_cache.clone())).await?;
         return Ok([self.detector.block_prefix.clone(), cradle.0, ct_buffer].concat());
     }
 }

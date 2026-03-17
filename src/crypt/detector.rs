@@ -1,8 +1,9 @@
-use std::{collections::HashMap, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{collections::HashMap, error::Error, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 
 use async_trait::async_trait;
 use futures::future::join_all;
 use rand::{Rng, RngCore, random_range, rng, seq::{IndexedRandom, IteratorRandom, SliceRandom}};
+use regex::Regex;
 use tokio::{
     select, sync::{Mutex, Semaphore}, task::JoinSet
 };
@@ -59,11 +60,15 @@ impl IntermediateDetector{
         transport: impl Transport,
         blk_size: usize,
         threads: usize,
+        baseline: Option<String>,
+        search_pat: Option<Regex>
     ) -> Result<Self, DecryptError>
     where
         Self: Sized,
     {
         let transport_shared = Arc::new(transport);
+
+        
         let blocks: Vec<Vec<u8>> = ct
         .chunks(blk_size.into())
         .map(|val| Vec::from(val))
@@ -84,7 +89,7 @@ impl IntermediateDetector{
                 let mut inter_ct = [blocks[i-1].clone(), blocks[i].clone()].concat();
                 //scramble the inter ciphertext block in such a way it doesn't affect the suffix much
                 inter_ct[0] = inter_ct[0] ^ r as u8;
-                let res = _detect(&inter_ct, Some(ct_prefix.clone()), Some(ct_suffix.clone()), transport_shared.clone(), blk_size, threads).await;
+                let res = _detect(&inter_ct, Some(ct_prefix.clone()), Some(ct_suffix.clone()), transport_shared.clone(), blk_size, threads,baseline.clone(), search_pat.clone()).await;
                 if let Ok(detector) = res {
                     found_transport = Some((detector, ct[..i*blk_size].to_vec(), ct[i*blk_size..].to_vec()));
                     break;
@@ -114,6 +119,7 @@ pub struct SimpleDetector {
     padding_valid_resp: String,
     transport: Arc<dyn Transport>,
     semaphore: Arc<Semaphore>,
+    search_pat: Option<Regex>
 }
 
 impl SimpleDetector {
@@ -123,11 +129,13 @@ impl SimpleDetector {
         transport: impl Transport,
         blk_size: usize,
         threads: usize,
+        baseline: Option<String>,
+        search_pat: Option<Regex>
     ) -> Result<Self, DecryptError>
     where
         Self: Sized,
     {
-        _detect(ct, ct_prefix, None, transport, blk_size, threads).await
+        _detect(ct, ct_prefix, None, transport, blk_size, threads, baseline ,search_pat).await
     }
 }
 
@@ -141,12 +149,35 @@ impl Detector for SimpleDetector {
             .await
             .expect("Error: semaphore closed");
         let mut res = DETECT::BASELINE;
-        if self.transport.exec(ct, None, None).await == self.padding_valid_resp {
-            res = DETECT::OUTLIER;
+        if let Ok(result) = self.transport.exec(ct, None, None).await{
+            if let Some(ref pat) = self.search_pat && pat.is_match(&result).to_string() == self.padding_valid_resp{
+                res = DETECT::OUTLIER
+            }else if self.search_pat.is_none() && result == self.padding_valid_resp{
+                res = DETECT::OUTLIER
+            }
         }
         drop(sem_acquire);
         return Ok(res);
     }
+}
+
+pub async fn find_baseline_response(ct: &[u8], transport: impl Transport, search_pat: Option<Regex>) -> Result<String, Box<dyn Error + Send>>{
+    let mut prev_result = None;
+    for _ in 0..10{
+        let response;
+        let response_raw = transport.exec(ct, None, None).await?;
+        if let Some(ref pat) = search_pat{
+            response = pat.is_match(&response_raw).to_string();
+        }else{
+            response = response_raw;
+        }
+        if let Some(prev) = prev_result && prev != response{
+            return Err(Box::new(DecryptError::BaselineError()))
+        }else{
+            prev_result = Some(response);
+        }
+    }
+    return Ok(prev_result.unwrap());
 }
 
 async fn _detect(
@@ -156,6 +187,8 @@ async fn _detect(
     transport: impl Transport,
     blk_size: usize,
     threads: usize,
+    baseline: Option<String>,
+    search_pat: Option<Regex>,
 ) -> Result<SimpleDetector, DecryptError>{
     let semaphore = Arc::new(Semaphore::new(threads));
     let blocks: Vec<Vec<u8>> = ct
@@ -167,42 +200,55 @@ async fn _detect(
             "Not enough blocks for classic attack".into(),
         ));
     }
+
     // though we could use anything for the first block for a basic padding transport, when we're doing the intermediate transport attack,
     // we need to take the first block as is
     let last_blocks_shared = Vec::from([blocks[blocks.len() - 2].clone(), blocks[blocks.len() - 1].clone()]);
 
-    let response_map_shared: Arc<Mutex<HashMap<String, u16>>> =
+    // map format is (Response key, (# of occurrences, Response text))
+    let response_map_shared: Arc<Mutex<HashMap<String, (u16, String)>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     let transport_shared = Arc::new(transport);
 
-    let mut futures_set = JoinSet::new();
+    //perform detection phase
+    let mut futures_set = vec![];
     for i in 0..=255 {
-        let sem_acquire = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("Error: semaphore closed");
         let mut last_blocks = last_blocks_shared.clone();
         let response_map = response_map_shared.clone();
         let transport = transport_shared.clone();
         let ct_prefix_copy = ct_prefix.clone();
         let ct_suffix_copy = ct_suffix.clone();
-        futures_set.spawn(async move {
+        let search_pat = search_pat.clone();
+        let semaphore = semaphore.clone();
+        futures_set.push(async move {
             last_blocks[0][blk_size as usize - 1] = i;
-            let response = transport
+            let sem_acquire = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Error: semaphore closed");
+            let response_result = transport
                 .exec(&last_blocks.iter().flatten().cloned().collect::<Vec<u8>>(), ct_prefix_copy, ct_suffix_copy)
                 .await;
-            let mut response_map_acquired = response_map.lock().await;
-            let num_response = response_map_acquired
-                .get(&response)
-                .unwrap_or(&0)
-                .to_owned();
-            response_map_acquired.insert(response, num_response + 1);
             drop(sem_acquire);
+            if let Ok(response) = response_result{
+                let response_key;
+                if let Some(search) = search_pat {
+                    response_key = search.is_match(&response).to_string();
+                }else{
+                    response_key = response;
+                }
+                let mut response_map_acquired = response_map.lock().await;
+                let (num_response, response_text) = response_map_acquired
+                    .get(&response_key)
+                    .unwrap_or(&(0, String::new()))
+                    .to_owned();
+                response_map_acquired.insert(response_key, (num_response + 1, response_text));
+            }
         });
     }
-    futures_set.join_all().await;
+    join_all(futures_set).await;
     let response_map_acquired = response_map_shared.lock().await;
     if response_map_acquired.keys().len() <= 1 {
         return Err(DecryptError::DifferentialResponses(
@@ -214,14 +260,19 @@ async fn _detect(
             "Too many unique responses found, may not be from a padding error".into(),
         ));
     }
-    let (padding_valid_resp, _) = response_map_acquired
-        .iter()
-        .min_by_key(|(_k, v)| *v)
-        .unwrap();
+    let padding_valid_resp;
+    if let Some(base) = baseline && response_map_acquired.contains_key(&base){
+        padding_valid_resp = base;
+    }else{
+        println!("Baseline Response not found during detection phase.");
+        return Err(DecryptError::BaselineError());
+    }
+    println!("padding valid resp {}", padding_valid_resp);
     let detector = SimpleDetector {
         padding_valid_resp: padding_valid_resp.to_owned(),
         transport: transport_shared.clone(),
         semaphore,
+        search_pat
     };
     return Ok(detector);
 }
