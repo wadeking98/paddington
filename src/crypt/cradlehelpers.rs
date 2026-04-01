@@ -11,7 +11,7 @@ use std::{
 use async_stream::stream;
 use futures::stream::StreamExt;
 use futures::{Stream, future::join_all, lock::Mutex};
-use rand::{RngCore, random_range, rng, seq::IteratorRandom};
+use rand::{random_range, seq::IteratorRandom};
 use statrs::statistics::Statistics;
 use tokio::{select, sync::mpsc::Sender};
 use tokio_util::sync::CancellationToken;
@@ -57,36 +57,87 @@ impl MakePrimeOptions {
 
 fn compare_fingerprints(fingerprint_1: &[bool], fingerprint_2: &[bool]) -> u8 {
     let mut counter = 0;
-    fingerprint_1.iter().zip(fingerprint_2).for_each(|(f1,f2)| if *f1 && *f2 {counter += 1;});
+    fingerprint_1
+        .iter()
+        .zip(fingerprint_2)
+        .for_each(|(f1, f2)| {
+            if *f1 && *f2 {
+                counter += 1;
+            }
+        });
     return counter;
 }
 
-async fn gen_byte_fingerprint(detector: &IntermediateDetector, blk_pos: usize, ct_prefix: &[u8], ct_suffix: &[u8], cradle_left: &[u8], cradle_right: &[u8], second_last_block:&[u8], last_block:&[u8], retry: u16) -> Result<Vec<bool>, DecryptError>{
-    let mut valid_bytes_fingerprint = vec![false;256];
-    for byte_raw in 0..=255{
+async fn gen_byte_fingerprint(
+    detector: &IntermediateDetector,
+    blk_pos: usize,
+    ct_prefix: &[u8],
+    ct_suffix: &[u8],
+    cradle_left: &[u8],
+    cradle_right: &[u8],
+    second_last_block: &[u8],
+    last_block: &[u8],
+    retry: u16,
+) -> Result<Vec<bool>, DecryptError> {
+    let mut valid_bytes_fingerprint = vec![false; 256];
+    for byte_raw in 0..=255 {
         let byte_normalized = byte_raw ^ second_last_block[blk_pos];
-        let res = check_byte_creates_invalid_pt(detector, byte_normalized, blk_pos, cradle_left, last_block, ct_prefix, &[cradle_right, ct_suffix].concat(), retry.into()).await?;
+        let res = check_byte_creates_invalid_pt(
+            detector,
+            byte_normalized,
+            blk_pos,
+            cradle_left,
+            last_block,
+            ct_prefix,
+            &[cradle_right, ct_suffix].concat(),
+            retry.into(),
+        )
+        .await?;
         valid_bytes_fingerprint[byte_raw as usize] = res;
     }
     return Ok(valid_bytes_fingerprint);
 }
 
-fn get_bad_bytes(last_byte_fingerprint_set: Vec<Vec<bool>>, padding_byte: u8) -> Vec<u8>{
-    return last_byte_fingerprint_set[0].iter().enumerate().filter(|(i, b)| **b && last_byte_fingerprint_set.iter().all(|set| set[*i])).map(|(i,_)| (i as u8) ^ padding_byte).collect::<Vec<u8>>();
+fn get_bad_bytes(last_byte_fingerprint_set: Vec<Vec<bool>>, padding_byte: u8) -> Vec<u8> {
+    return last_byte_fingerprint_set[0]
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| **b && last_byte_fingerprint_set.iter().all(|set| set[*i]))
+        .map(|(i, _)| (i as u8) ^ padding_byte)
+        .collect::<Vec<u8>>();
 }
 
 // use padding from last block to discover invalid bytes. we can determine how many bytes in the last block
 // are the same based on the output of check_byte_creates_invalid_pt which builds a rough "fingerprint" for a plaintext byte
-pub async fn discover_bad_bytes(detector: &IntermediateDetector, ct_prefix: &[u8], ct_suffix: &[u8], second_last_block:&[u8], last_block:&[u8], retry: u16) -> Result<Vec<u8>, DecryptError>{
+pub async fn discover_bad_bytes(
+    detector: &IntermediateDetector,
+    ct_prefix: &[u8],
+    ct_suffix: &[u8],
+    second_last_block: &[u8],
+    last_block: &[u8],
+    retry: u16,
+) -> Result<Vec<u8>, DecryptError> {
     // work really hard to find a simple cradle. We can't use a complex cradle because we don't know what the bad bytes are yet.
     let cradle = build_cradle_2(detector, last_block, ct_prefix, ct_suffix, 1000, None).await?;
     let fingerprint_set = Arc::new(Mutex::new(vec![]));
     let mut futures_set = vec![];
-    for _ in 0..6{
+    for _ in 0..6 {
         let fingerprint_set = fingerprint_set.clone();
         let cradle = cradle.clone();
         futures_set.push(async move {
-            if let Ok(fingerprint) = gen_byte_fingerprint(detector, last_block.len()-1, ct_prefix, ct_suffix, &cradle.0, &cradle.1, second_last_block, last_block, retry).await{
+            if let Ok(fingerprint) = gen_byte_fingerprint(
+                detector,
+                last_block.len() - 1,
+                ct_prefix,
+                ct_suffix,
+                &cradle.0,
+                &cradle.1,
+                second_last_block,
+                last_block,
+                retry,
+            )
+            .await
+            {
                 fingerprint_set.lock().await.push(fingerprint);
             }
         });
@@ -96,9 +147,14 @@ pub async fn discover_bad_bytes(detector: &IntermediateDetector, ct_prefix: &[u8
     let mut distance_set = vec![];
     let mut points_visited = vec![];
     // generate a measure of how "close" two of the same byte fingerprints should be.
-    // a baseline is established by looking at the average fingerprint "distance" 
-    for (i, fingerprint_1) in fingerprint_set.iter().enumerate(){
-        for fingerprint_2 in fingerprint_set.iter().enumerate().filter(|(j,_)| i != *j && !points_visited.contains(j)).map(|(_,f)|f){
+    // a baseline is established by looking at the average fingerprint "distance"
+    for (i, fingerprint_1) in fingerprint_set.iter().enumerate() {
+        for fingerprint_2 in fingerprint_set
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| i != *j && !points_visited.contains(j))
+            .map(|(_, f)| f)
+        {
             distance_set.push(compare_fingerprints(fingerprint_1, fingerprint_2));
         }
         points_visited.push(i);
@@ -110,17 +166,28 @@ pub async fn discover_bad_bytes(detector: &IntermediateDetector, ct_prefix: &[u8
     // use the standard deviation and mean to find outliers and calculate padding length
     let fingerprint_compare = fingerprint_set[0].clone();
     let mut padding_byte = 1u8;
-    for i in (0..last_block.len()-1).rev() {
-        let fingerprint = gen_byte_fingerprint(detector, i, ct_prefix, ct_suffix, &cradle.0, &cradle.1, second_last_block, last_block, retry).await?;
+    for i in (0..last_block.len() - 1).rev() {
+        let fingerprint = gen_byte_fingerprint(
+            detector,
+            i,
+            ct_prefix,
+            ct_suffix,
+            &cradle.0,
+            &cradle.1,
+            second_last_block,
+            last_block,
+            retry,
+        )
+        .await?;
         let distance = compare_fingerprints(&fingerprint, &fingerprint_compare);
         let deviation = mean - distance as f64;
-        if distance == 0 || deviation >= mean + std_dev*3.0 || deviation <= mean - std_dev*3.0{
+        if distance == 0 || deviation >= mean + std_dev * 3.0 || deviation <= mean - std_dev * 3.0 {
             // found outlier
             padding_byte = i as u8;
             break;
         }
     }
-    
+
     // convert fingerprint to byte string
     let mut bad_bytes = get_bad_bytes(fingerprint_set, padding_byte);
     bad_bytes.sort();
@@ -510,63 +577,160 @@ pub async fn build_cradle_2(
     prime_cache: Option<Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>>,
 ) -> Result<(Vec<u8>, Vec<u8>), DecryptError> {
     let block_size = cradle_block.len();
-    let c1 = ct_prefix[ct_prefix.len()-block_size..].to_vec();
-    let c1_prime = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, None, prime_cache.clone()).next().await.unwrap();
-    if c1_prime.is_none(){
-        return Err(DecryptError::CradleBuildIssue("Could not find valid prime".to_string()));
+    let c1 = ct_prefix[ct_prefix.len() - block_size..].to_vec();
+    let c1_prime = _make_prime(
+        detector,
+        &c1,
+        ct_prefix,
+        ct_suffix,
+        retry,
+        None,
+        prime_cache.clone(),
+    )
+    .next()
+    .await
+    .unwrap();
+    if c1_prime.is_none() {
+        return Err(DecryptError::CradleBuildIssue(
+            "Could not find valid prime".to_string(),
+        ));
     }
     let mut c1_prime = c1_prime.unwrap();
-    let prefix = [ct_prefix,&c1_prime].concat();
-    let mut c2_prime_generator = _make_prime(detector, &c1, &prefix, ct_suffix, retry, Some(MakePrimeOptions{high_entropy:Some(true),fixed_blk_pos:None, valid_bytes:None}), prime_cache.clone());
+    let prefix = [ct_prefix, &c1_prime].concat();
+    let mut c2_prime_generator = _make_prime(
+        detector,
+        &c1,
+        &prefix,
+        ct_suffix,
+        retry,
+        Some(MakePrimeOptions {
+            high_entropy: Some(true),
+            fixed_blk_pos: None,
+            valid_bytes: None,
+        }),
+        prime_cache.clone(),
+    );
 
     let c2_prime = c2_prime_generator.next().await.unwrap();
-    if c2_prime.is_none(){
-        return Err(DecryptError::CradleBuildIssue("Could not find valid prime".to_string()));
+    if c2_prime.is_none() {
+        return Err(DecryptError::CradleBuildIssue(
+            "Could not find valid prime".to_string(),
+        ));
     }
     let mut c2_prime = c2_prime.unwrap();
 
     let mut cradle_indexes_to_set = (0..block_size).collect::<Vec<usize>>();
-    while c1_prime != cradle_block{
+    while c1_prime != cradle_block {
         let mut new_c1_prime = c1_prime.clone();
-        for i in cradle_indexes_to_set.clone(){
+        for i in cradle_indexes_to_set.clone() {
             let cradle_byte = cradle_block[i];
-            if let Ok(is_invalid) = check_byte_creates_invalid_pt(detector, cradle_byte, i, &c1_prime, &c2_prime, ct_prefix, ct_suffix, 20).await && !is_invalid{
+            if let Ok(is_invalid) = check_byte_creates_invalid_pt(
+                detector,
+                cradle_byte,
+                i,
+                &c1_prime,
+                &c2_prime,
+                ct_prefix,
+                ct_suffix,
+                20,
+            )
+            .await
+                && !is_invalid
+            {
                 // on success, set the c1_prime byte to slowly make it into the cradle block
                 new_c1_prime[i] = cradle_byte;
-                cradle_indexes_to_set = cradle_indexes_to_set.iter().filter(|idx| **idx != i).map(|b|*b).collect();
+                cradle_indexes_to_set = cradle_indexes_to_set
+                    .iter()
+                    .filter(|idx| **idx != i)
+                    .map(|b| *b)
+                    .collect();
             }
         }
         c1_prime = new_c1_prime;
         let suffix = [&c2_prime, ct_suffix].concat();
-        let mut fixed_pos = (0..block_size).filter(|pos| !cradle_indexes_to_set.contains(pos)).collect::<Vec<usize>>();
-        let new_c1_prime = _make_prime(detector, &c1_prime, ct_prefix, &suffix, retry, Some(MakePrimeOptions { high_entropy: Some(true), fixed_blk_pos: Some(fixed_pos.clone()), valid_bytes: None }), prime_cache.clone()).next().await.unwrap();
-        if new_c1_prime.is_none(){
+        let mut fixed_pos = (0..block_size)
+            .filter(|pos| !cradle_indexes_to_set.contains(pos))
+            .collect::<Vec<usize>>();
+        let new_c1_prime = _make_prime(
+            detector,
+            &c1_prime,
+            ct_prefix,
+            &suffix,
+            retry,
+            Some(MakePrimeOptions {
+                high_entropy: Some(true),
+                fixed_blk_pos: Some(fixed_pos.clone()),
+                valid_bytes: None,
+            }),
+            prime_cache.clone(),
+        )
+        .next()
+        .await
+        .unwrap();
+        if new_c1_prime.is_none() {
             // could not find new c1_prime, back off and try again
             if fixed_pos.len() > 1 {
                 cradle_indexes_to_set.push(fixed_pos.pop().unwrap());
                 continue;
-            }else{
-                return Err(DecryptError::CradleBuildIssue("Could not find valid prime".to_string()));
+            } else {
+                return Err(DecryptError::CradleBuildIssue(
+                    "Could not find valid prime".to_string(),
+                ));
             }
         }
         c1_prime = new_c1_prime.unwrap();
         // modify c2_prime for the next round
         let prefix = [ct_prefix, &c1_prime].concat();
-        if let Some(new_c2) = _make_prime(detector, &c2_prime.clone(), &prefix, ct_suffix, retry, None, prime_cache.clone()).next().await.unwrap(){
+        if let Some(new_c2) = _make_prime(
+            detector,
+            &c2_prime.clone(),
+            &prefix,
+            ct_suffix,
+            retry,
+            None,
+            prime_cache.clone(),
+        )
+        .next()
+        .await
+        .unwrap()
+        {
             c2_prime = new_c2;
         }
     }
-    let mut c1_prime_generator = _make_prime(detector, &c1, ct_prefix, ct_suffix, retry, Some(MakePrimeOptions{high_entropy:Some(true), fixed_blk_pos:None, valid_bytes:None}), prime_cache.clone());
-    for _ in 0..retry{
+    let mut c1_prime_generator = _make_prime(
+        detector,
+        &c1,
+        ct_prefix,
+        ct_suffix,
+        retry,
+        Some(MakePrimeOptions {
+            high_entropy: Some(true),
+            fixed_blk_pos: None,
+            valid_bytes: None,
+        }),
+        prime_cache.clone(),
+    );
+    for _ in 0..retry {
         let maybe_cradle_left = c1_prime_generator.next().await.unwrap();
-        if maybe_cradle_left.is_none(){
+        if maybe_cradle_left.is_none() {
             continue;
         }
         let maybe_cradle_left = maybe_cradle_left.unwrap();
-        let test_ct = [ct_prefix, &maybe_cradle_left, &c1_prime, &c2_prime, ct_suffix].concat();
-        if let Ok(res) = detector.check(&test_ct).await && res == DETECT::OUTLIER{
+        let test_ct = [
+            ct_prefix,
+            &maybe_cradle_left,
+            &c1_prime,
+            &c2_prime,
+            ct_suffix,
+        ]
+        .concat();
+        if let Ok(res) = detector.check(&test_ct).await
+            && res == DETECT::OUTLIER
+        {
             return Ok((maybe_cradle_left, c2_prime));
         }
     }
-    return Err(DecryptError::CradleBuildIssue("Could not find last prime to finish cradle".to_string()))
+    return Err(DecryptError::CradleBuildIssue(
+        "Could not find last prime to finish cradle".to_string(),
+    ));
 }

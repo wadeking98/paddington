@@ -7,9 +7,7 @@ use tokio::sync::mpsc::Sender;
 use crate::{
     crypt::{
         MessageForwarder,
-        cradlehelpers::{
-         build_cradle_2, decrypt_intermediate_block
-        },
+        cradlehelpers::{build_cradle_2, decrypt_intermediate_block},
         decrypt::_padding_decrypt,
         detector::{Detector, IntermediateDetector},
         forge::_padding_forge,
@@ -162,7 +160,7 @@ impl Oracle for IntermediateOracle {
             let tx = self.tx.clone();
             let prime_cache = prime_cache.clone();
             let bad_chars = self.bad_chars.clone();
-            let iv = chunks[i-1].clone();
+            let iv = chunks[i - 1].clone();
             let pt_buffer = pt_buffer.clone();
             let msg_forwarder = MessageForwarder::new(
                 self.tx.clone(),
@@ -206,7 +204,7 @@ impl Oracle for IntermediateOracle {
             });
         }
         join_all(cradle_futures).await;
-        
+
         return Ok(pt_buffer.lock().await.concat());
     }
 
