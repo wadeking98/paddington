@@ -2,7 +2,6 @@ use std::{collections::HashMap, error::Error, sync::Arc};
 
 use async_trait::async_trait;
 use futures::future::join_all;
-use rand::seq::IndexedRandom;
 use regex::Regex;
 use tokio::sync::{Mutex, Semaphore};
 

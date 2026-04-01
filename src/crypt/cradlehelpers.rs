@@ -22,23 +22,6 @@ use crate::{
     helper::Messages,
 };
 
-#[derive(Clone, Debug)]
-pub struct ComputeCache {
-    valid_bytes: Vec<u8>,
-    c1_prime: Vec<u8>,
-    // 0 is the ciphertext and 1 is the plaintext
-    c2_prime: (Vec<u8>, Vec<u8>),
-}
-impl ComputeCache {
-    pub fn new() -> Self {
-        return ComputeCache {
-            valid_bytes: vec![],
-            c1_prime: vec![],
-            c2_prime: (vec![], vec![]),
-        };
-    }
-}
-
 #[derive(Clone, Hash)]
 struct MakePrimeOptions {
     high_entropy: Option<bool>,
