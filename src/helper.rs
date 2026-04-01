@@ -1,13 +1,13 @@
-use std::{collections::HashMap, string::FromUtf8Error};
+use base64::prelude::*;
+use clap::ValueEnum;
 use cookie::{Cookie, CookieJar};
 use regex::Regex;
 use serde_json::Value;
+use std::{collections::HashMap, string::FromUtf8Error};
 use strum_macros::Display;
-use clap::ValueEnum;
-use base64::prelude::*;
 use urlencoding::{decode, encode};
 
-use crate::{transport::HTTPTransport};
+use crate::transport::HTTPTransport;
 
 #[derive(Display, Debug, Clone, ValueEnum)]
 pub enum Encoding {
@@ -23,7 +23,7 @@ pub enum Messages {
     ByteFound(u8, usize),
     AttackComplete,
     NoOracleFound,
-    FoundCradle
+    FoundCradle,
 }
 
 #[derive(Clone)]
@@ -207,9 +207,8 @@ pub fn set_injection_points(transport: &mut HTTPTransport) -> Option<String> {
     return found_ct;
 }
 
-pub fn parse_bad_chars(bad_chars: Option<String>) -> Vec<u8>{
-
-    if let Some(char_str) = bad_chars{
+pub fn parse_bad_chars(bad_chars: Option<String>) -> Vec<u8> {
+    if let Some(char_str) = bad_chars {
         let mut bytes = Vec::new();
         let mut chars = char_str.chars().peekable();
 
@@ -230,6 +229,5 @@ pub fn parse_bad_chars(bad_chars: Option<String>) -> Vec<u8>{
         }
         return bytes;
     }
-    // return JSON bad char configuration
-    return vec![ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x22];
+    return vec![];
 }

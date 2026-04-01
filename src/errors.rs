@@ -10,7 +10,9 @@ pub enum DecryptError {
     DifferentialResponses(String),
     #[error("Error when performing bad byte attack, you likely provided incorrect bad bytes: {0}")]
     BadByteIssue(String),
-    #[error("Error when building cradle, there may be too many invalid characters to feasibly exploit the oracle: {0}")]
+    #[error(
+        "Error when building cradle, there may be too many invalid characters to feasibly exploit the oracle: {0}"
+    )]
     CradleBuildIssue(String),
     #[error("Error when establishing baseline")]
     BaselineError(),

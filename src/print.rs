@@ -8,7 +8,9 @@ use std::{
 
 use colored::Colorize;
 use tokio::{
-    select, spawn, sync::{Mutex, mpsc::Receiver}, time::sleep
+    select, spawn,
+    sync::{Mutex, mpsc::Receiver},
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -30,88 +32,87 @@ pub fn fmt_bytes_custom(bytes: &[u8]) -> String {
 
 ///displays a progress bar to the terminal. updates to the bytes are received from rx
 pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) -> impl Fn() {
-        let curr_results: Vec<u8> = vec![b'-'; ct_len];
-        let curr_results_modified: Vec<bool> = vec![false; ct_len];
-        let loading_map = HashMap::from([(b'|', b'/'), (b'/', b'-'), (b'-', b'\\'), (b'\\', b'|')]);
-        let curr_results_shared = Arc::new(Mutex::new(curr_results));
-        let curr_results_modified_shared = Arc::new(Mutex::new(curr_results_modified));
-        let curr_results_shared_copy = curr_results_shared.clone();
-        let curr_results_modified_shared_copy = curr_results_modified_shared.clone();
-        
-        let token = CancellationToken::new();
-        let cloned_token = token.clone();
-        let handle1 = spawn(async move {
-            loop {
-                let msg = rx.recv().await;
-                if let Some(msg) = msg {
-                    match msg {
-                        Messages::ByteFound(byte, pos) => {
-                            let mut curr_results = curr_results_shared.lock().await;
-                            let mut curr_results_modified =
-                                curr_results_modified_shared.lock().await;
-                            curr_results[pos] = byte;
-                            curr_results_modified[pos] = true;
-                        }
-                        Messages::OracleConfirmed => {
-                            print!("\r\x1B[2K");
-                            io::stdout().flush().unwrap();
-                            println!("{}", "Padding Oracle Confirmed!".green());
-                        },
-                        Messages::NoOracleFound => {
-                            token.cancel();
-                            return;
-                        },
-                        Messages::FoundCradle =>{
-                            print!("\r\x1B[2K");
-                            io::stdout().flush().unwrap();
-                            println!("{}", "Found Cradle!".green());
-                        }
-                        _ => (),
-                    };
-                }
-            }
-        });
-        let handle2 = spawn(async move {
-            let truncate_len = 64;
-            loop {
-                select! {
-                    _ = sleep(Duration::from_millis(250)) =>{},
-                    _ = cloned_token.cancelled() =>{
+    let curr_results: Vec<u8> = vec![b'-'; ct_len];
+    let curr_results_modified: Vec<bool> = vec![false; ct_len];
+    let loading_map = HashMap::from([(b'|', b'/'), (b'/', b'-'), (b'-', b'\\'), (b'\\', b'|')]);
+    let curr_results_shared = Arc::new(Mutex::new(curr_results));
+    let curr_results_modified_shared = Arc::new(Mutex::new(curr_results_modified));
+    let curr_results_shared_copy = curr_results_shared.clone();
+    let curr_results_modified_shared_copy = curr_results_modified_shared.clone();
+
+    let token = CancellationToken::new();
+    let cloned_token = token.clone();
+    let handle1 = spawn(async move {
+        loop {
+            let msg = rx.recv().await;
+            if let Some(msg) = msg {
+                match msg {
+                    Messages::ByteFound(byte, pos) => {
+                        let mut curr_results = curr_results_shared.lock().await;
+                        let mut curr_results_modified = curr_results_modified_shared.lock().await;
+                        curr_results[pos] = byte;
+                        curr_results_modified[pos] = true;
+                    }
+                    Messages::OracleConfirmed => {
+                        print!("\r\x1B[2K");
+                        io::stdout().flush().unwrap();
+                        println!("{}", "Padding Oracle Confirmed!".green());
+                    }
+                    Messages::NoOracleFound => {
+                        token.cancel();
                         return;
                     }
-                }
-                let mut curr_results = curr_results_shared_copy.lock().await;
-                let curr_results_modified = curr_results_modified_shared_copy.lock().await;
-                // update loop
-                for i in 0..curr_results.len() {
-                    //skip results that have been modified
-                    if curr_results_modified[i] {
-                        continue;
+                    Messages::FoundCradle => {
+                        print!("\r\x1B[2K");
+                        io::stdout().flush().unwrap();
+                        println!("{}", "Found Cradle!".green());
                     }
-                    curr_results[i] = *loading_map.get(&curr_results[i]).unwrap_or(&b'-');
-                }
-                let working_chunk = curr_results_modified
-                    .chunks(truncate_len)
-                    .position(|c| c.contains(&false) && c.contains(&true))
-                    .unwrap_or(0);
-
-                let end = min((working_chunk + 1) * truncate_len, curr_results.len());
-                let curr_results_slice = &curr_results[working_chunk * truncate_len..end];
-                let byte_string = fmt_bytes_custom(&curr_results_slice);
-                print!("\r\x1B[2K");
-                io::stdout().flush().unwrap();
-                print!("{}", byte_string);
-                if ct_len > truncate_len {
-                    print!("...");
-                }
-
-                io::stdout().flush().unwrap();
+                    _ => (),
+                };
             }
-        });
-        return move || {
-            handle1.abort();
-            handle2.abort();
+        }
+    });
+    let handle2 = spawn(async move {
+        let truncate_len = 64;
+        loop {
+            select! {
+                _ = sleep(Duration::from_millis(250)) =>{},
+                _ = cloned_token.cancelled() =>{
+                    return;
+                }
+            }
+            let mut curr_results = curr_results_shared_copy.lock().await;
+            let curr_results_modified = curr_results_modified_shared_copy.lock().await;
+            // update loop
+            for i in 0..curr_results.len() {
+                //skip results that have been modified
+                if curr_results_modified[i] {
+                    continue;
+                }
+                curr_results[i] = *loading_map.get(&curr_results[i]).unwrap_or(&b'-');
+            }
+            let working_chunk = curr_results_modified
+                .chunks(truncate_len)
+                .position(|c| c.contains(&false) && c.contains(&true))
+                .unwrap_or(0);
+
+            let end = min((working_chunk + 1) * truncate_len, curr_results.len());
+            let curr_results_slice = &curr_results[working_chunk * truncate_len..end];
+            let byte_string = fmt_bytes_custom(&curr_results_slice);
             print!("\r\x1B[2K");
             io::stdout().flush().unwrap();
+            print!("{}", byte_string);
+            if ct_len > truncate_len {
+                print!("...");
+            }
+
+            io::stdout().flush().unwrap();
         }
+    });
+    return move || {
+        handle1.abort();
+        handle2.abort();
+        print!("\r\x1B[2K");
+        io::stdout().flush().unwrap();
+    };
 }

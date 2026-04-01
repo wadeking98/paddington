@@ -7,27 +7,27 @@ use std::{
 };
 
 use futures::future::join_all;
-use rand::{RngCore, random_range, seq::IteratorRandom};
+use rand::RngCore;
 use tokio::{
     select, spawn,
     sync::{
         Mutex,
         mpsc::{self, Sender},
     },
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    crypt::detector::{DETECT, Detector, IntermediateDetector},
+    crypt::detector::{DETECT, Detector},
     errors::DecryptError,
     helper::Messages,
 };
 
+pub mod cradlehelpers;
 pub mod decrypt;
 pub mod detector;
 pub mod forge;
-pub mod cradlehelpers;
 
 pub struct MessageForwarder {
     join_handle: JoinHandle<()>,
@@ -109,7 +109,7 @@ pub async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
         let mut iv = vec![0u8; blk_size as usize];
         // use random bytes instead of 00s for IV, works better with preventing bad bytes
         rand::rng().fill_bytes(&mut iv);
-        
+
         let curr_padding = blk_size - i;
         //set the padding except for the current byte we're working on: \x02, \x03\x03, \x04\x04\x04, etc
         for k in (blk_size - (curr_padding - 1))..blk_size {
@@ -136,11 +136,15 @@ pub async fn calc_intermediate_vector<D: Detector + Send + Sync + 'static>(
                 if !success.load(Ordering::SeqCst)
                     && let Ok(response) = detector
                         .check(
-                            &[ct_prefix,iv_copy
-                                .iter()
-                                .chain(&ct_block)
-                                .cloned()
-                                .collect::<Vec<u8>>()].concat(),
+                            &[
+                                ct_prefix,
+                                iv_copy
+                                    .iter()
+                                    .chain(&ct_block)
+                                    .cloned()
+                                    .collect::<Vec<u8>>(),
+                            ]
+                            .concat(),
                         )
                         .await
                 {

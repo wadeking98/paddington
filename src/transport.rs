@@ -1,27 +1,40 @@
 use std::{error::Error, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use regex::{Regex, RegexBuilder};
-use reqwest::{Client, Error as ReqError, Method, Proxy, redirect::Policy};
+use reqwest::{Client, Method, Proxy, redirect::Policy};
 
 use crate::helper::{Encoding, decode_ct, encode_ct, set_injection_points};
 
-
 #[async_trait]
 pub trait Transport: 'static + Send + Sync {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> Result<String, Box<dyn Error + Send>>;
+    async fn exec(
+        &self,
+        ct: &[u8],
+        ct_prefix: Option<Vec<u8>>,
+        ct_suffix: Option<Vec<u8>>,
+    ) -> Result<String, Box<dyn Error + Send>>;
 }
 
 #[async_trait]
 impl<T: Transport> Transport for Arc<T> {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> Result<String, Box<dyn Error + Send>> {
+    async fn exec(
+        &self,
+        ct: &[u8],
+        ct_prefix: Option<Vec<u8>>,
+        ct_suffix: Option<Vec<u8>>,
+    ) -> Result<String, Box<dyn Error + Send>> {
         self.as_ref().exec(ct, ct_prefix, ct_suffix).await
     }
 }
 
 #[async_trait]
 impl<T: Transport + ?Sized> Transport for Box<T> {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> Result<String, Box<dyn Error + Send>> {
+    async fn exec(
+        &self,
+        ct: &[u8],
+        ct_prefix: Option<Vec<u8>>,
+        ct_suffix: Option<Vec<u8>>,
+    ) -> Result<String, Box<dyn Error + Send>> {
         self.as_ref().exec(ct, ct_prefix, ct_suffix).await
     }
 }
@@ -40,7 +53,12 @@ pub struct HTTPTransport {
 
 #[async_trait]
 impl Transport for HTTPTransport {
-    async fn exec(&self, ct: &[u8], ct_prefix: Option<Vec<u8>>, ct_suffix: Option<Vec<u8>>) -> Result<String, Box<dyn Error + Send>> {
+    async fn exec(
+        &self,
+        ct: &[u8],
+        ct_prefix: Option<Vec<u8>>,
+        ct_suffix: Option<Vec<u8>>,
+    ) -> Result<String, Box<dyn Error + Send>> {
         let ct_prefix = ct_prefix.unwrap_or(vec![]);
         let ct_suffix = ct_suffix.unwrap_or(vec![]);
         let ct = [ct_prefix.as_slice(), ct, ct_suffix.as_slice()].concat();
@@ -63,7 +81,8 @@ impl Transport for HTTPTransport {
         // insert into url
         let url = self.url.replace(&injection_point, &modified_ct);
 
-        let mut client_builder = Client::builder().timeout(Duration::from_secs(10))
+        let mut client_builder = Client::builder()
+            .timeout(Duration::from_secs(10))
             .redirect(Policy::none())
             .http1_title_case_headers();
 
@@ -75,10 +94,7 @@ impl Transport for HTTPTransport {
         let client = client_builder
             .build()
             .expect("Error: could not build request");
-
-
         // println!("Sending request");
-        ;
         let mut req = client.request(self.method.clone(), &url);
         // add request body
         if let Some(ref body) = data {
@@ -92,18 +108,20 @@ impl Transport for HTTPTransport {
         let mut response = req.try_clone().unwrap().send().await;
 
         // loop with retry for timeout
-        if response.is_err() && response.as_ref().err().unwrap().is_timeout(){
-            for _ in 0..10{
+        if response.is_err() && response.as_ref().err().unwrap().is_timeout() {
+            for _ in 0..10 {
                 let retry_response = req.try_clone().unwrap().send().await;
-                if retry_response.is_ok(){
+                if retry_response.is_ok() {
                     response = retry_response;
                     break;
-                }else if let Some(err) = retry_response.err() && !err.is_timeout() {
+                } else if let Some(err) = retry_response.err()
+                    && !err.is_timeout()
+                {
                     return Err(Box::new(err));
                 }
             }
         }
-        if response.is_err(){
+        if response.is_err() {
             return Err(Box::new(response.err().unwrap()));
         }
         let response = response.unwrap();

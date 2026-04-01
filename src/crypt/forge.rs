@@ -3,12 +3,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use crate::{
-    crypt::{
-        MessageForwarder, calc_intermediate_vector,
-        detector::{Detector, SimpleDetector},
-    },
+    crypt::{MessageForwarder, calc_intermediate_vector, detector::Detector},
     errors::DecryptError,
-    helper::{Config, Messages}, transport::Transport,
+    helper::Messages,
 };
 
 // we don't really need the cipher text, we could make our own, but it keeps the Detector consistent with the decryption step
