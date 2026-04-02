@@ -99,9 +99,11 @@ pub async fn discover_bad_bytes(
     second_last_block: &[u8],
     last_block: &[u8],
     retry: u16,
+    tx: Sender<Messages>
 ) -> Result<Vec<u8>, DecryptError> {
     // work really hard to find a simple cradle. We can't use a complex cradle because we don't know what the bad bytes are yet.
     let cradle = build_cradle_2(detector, last_block, ct_prefix, ct_suffix, 1000, None).await?;
+    let _ = tx.send(Messages::FoundCradle).await;
     let fingerprint_set = Arc::new(Mutex::new(vec![]));
     let mut futures_set = vec![];
     for _ in 0..6 {
