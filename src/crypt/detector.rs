@@ -69,7 +69,7 @@ impl IntermediateDetector {
         }
         let mut found_transport: Option<(SimpleDetector, Vec<u8>, Vec<u8>)> = None;
         for i in 1..blocks.len() {
-            let retry = 10;
+            let retry = 20;
             for r in 1..retry {
                 // additive intermediate algorithm
 

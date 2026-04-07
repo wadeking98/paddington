@@ -173,7 +173,7 @@ impl Oracle for IntermediateOracle {
                 }),
             );
             cradle_futures.push(async move {
-                if let Ok(cradle) = build_cradle_2(
+                let cradle_res = build_cradle_2(
                     &detector,
                     &block_for_decryption,
                     &detector.block_prefix,
@@ -181,8 +181,8 @@ impl Oracle for IntermediateOracle {
                     500,
                     Some(prime_cache),
                 )
-                .await
-                {
+                .await;
+                if let Ok(cradle) = cradle_res {
                     cradles.lock().await[i - 1] = Some(cradle.clone());
                     let _ = tx.send(Messages::FoundCradle).await;
                     let (pt, _) = decrypt_intermediate_block(
@@ -200,6 +200,8 @@ impl Oracle for IntermediateOracle {
                     .unwrap();
                     let mut pt_buff = pt_buffer.lock().await;
                     pt_buff[i - 1] = pt;
+                } else {
+                    println!("{:?}", cradle_res.err())
                 }
             });
         }

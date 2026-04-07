@@ -306,8 +306,8 @@ async fn main() {
                         &detector.block_suffix,
                         &second_last_block,
                         &last_block,
-                        80,
-                        tx.clone()
+                        20,
+                        tx.clone(),
                     )
                     .await;
 
@@ -318,7 +318,10 @@ async fn main() {
                     } else {
                         print!("\r\x1B[2K");
                         io::stdout().flush().unwrap();
-                        println!("Could not auto discover bad bytes");
+                        println!(
+                            "Could not auto discover bad bytes: {:?}",
+                            bad_bytes_res.err()
+                        );
                     }
                     return;
                 }
