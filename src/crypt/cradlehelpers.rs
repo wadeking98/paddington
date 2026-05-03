@@ -23,7 +23,7 @@ use crate::{
 };
 
 #[derive(Clone, Hash)]
-struct MakePrimeOptions {
+pub struct MakePrimeOptions {
     high_entropy: Option<bool>,
     fixed_blk_pos: Option<Vec<usize>>,
     valid_bytes: Option<Vec<(usize, Vec<u8>)>>,
@@ -100,21 +100,28 @@ pub async fn discover_bad_bytes(
     last_block: &[u8],
     retry: u16,
     tx: Sender<Messages>,
+    inplace: bool
 ) -> Result<Vec<u8>, DecryptError> {
-    // work really hard to find a simple cradle. We can't use a complex cradle because we don't know what the bad bytes are yet.
-    let cradle = build_cradle_2(detector, last_block, ct_prefix, ct_suffix, 200, None).await?;
+    let block_size = last_block.len();
+    let cradle = build_cradle_2(detector, last_block, ct_prefix, ct_suffix, 200, None, inplace).await?;
+    let (ct_prefix, ct_suffix) = match inplace{
+        false => (ct_prefix.to_vec(), ct_suffix.to_vec()),
+        true => (ct_prefix[..ct_prefix.len() - block_size].to_vec(), ct_suffix[2*block_size..].to_vec())
+    };
     let _ = tx.send(Messages::FoundCradle).await;
     let fingerprint_set = Arc::new(Mutex::new(vec![]));
     let mut futures_set = vec![];
     for _ in 0..10 {
         let fingerprint_set = fingerprint_set.clone();
         let cradle = cradle.clone();
+        let ct_prefix = ct_prefix.clone();
+        let ct_suffix = ct_suffix.clone();
         futures_set.push(async move {
             if let Ok(fingerprint) = gen_byte_fingerprint(
                 detector,
                 last_block.len() - 1,
-                ct_prefix,
-                ct_suffix,
+                &ct_prefix,
+                &ct_suffix,
                 &cradle.0,
                 &cradle.1,
                 second_last_block,
@@ -155,8 +162,8 @@ pub async fn discover_bad_bytes(
         let fingerprint = gen_byte_fingerprint(
             detector,
             last_block.len() - 1 - i,
-            ct_prefix,
-            ct_suffix,
+            &ct_prefix,
+            &ct_suffix,
             &cradle.0,
             &cradle.1,
             second_last_block,
@@ -463,7 +470,7 @@ pub async fn decrypt_intermediate_block(
     return Ok((pt, valid_bytes_shared.lock().await.to_vec()));
 }
 
-fn _make_prime(
+pub fn _make_prime(
     detector: &IntermediateDetector,
     ct: &[u8],
     ct_prefix: &[u8],
@@ -520,7 +527,7 @@ fn _make_prime(
                             ct_prime[pos] = ct_prime[pos] ^ (1 << random_range(0..8));
                         }
                     }
-                    let full_ct = [ct_prefix, ct_prime.as_slice(), ct_suffix].concat();
+                    let full_ct = [ct_prefix, &ct_prime, ct_suffix].concat();
 
                     if success.load(Ordering::SeqCst){
                         return;
@@ -555,15 +562,7 @@ fn _make_prime(
     return Box::pin(stream);
 }
 
-pub async fn build_cradle_2(
-    detector: &IntermediateDetector,
-    cradle_block: &[u8],
-    ct_prefix: &[u8],
-    ct_suffix: &[u8],
-    retry: u16,
-    prime_cache: Option<Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>>,
-) -> Result<(Vec<u8>, Vec<u8>), DecryptError> {
-    let block_size = cradle_block.len();
+async fn prepare_c1_c2_prime(detector: &IntermediateDetector, ct_prefix: &[u8], ct_suffix: &[u8], retry: u16, prime_cache: Option<Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>>, block_size: usize) -> Result<(Vec<u8>,Vec<u8>), DecryptError>{
     let ct = ct_prefix[ct_prefix.len() - block_size..].to_vec();
     let c2_prime = _make_prime(
         detector,
@@ -572,7 +571,7 @@ pub async fn build_cradle_2(
         ct_suffix,
         retry,
         None,
-        prime_cache.clone(),
+        prime_cache.clone()
     )
     .next()
     .await
@@ -582,7 +581,7 @@ pub async fn build_cradle_2(
             "Could not find valid prime".to_string(),
         ));
     }
-    let mut c2_prime = c2_prime.unwrap();
+    let c2_prime = c2_prime.unwrap();
     let suffix = [&c2_prime, ct_suffix].concat();
     let mut c1_prime_generator = _make_prime(
         detector,
@@ -604,7 +603,35 @@ pub async fn build_cradle_2(
             "Could not find valid prime".to_string(),
         ));
     }
-    let mut c1_prime = c1_prime.unwrap();
+    let c1_prime = c1_prime.unwrap();
+    return Ok((c1_prime, c2_prime));
+}
+
+pub async fn build_cradle_2(
+    detector: &IntermediateDetector,
+    cradle_block: &[u8],
+    ct_prefix: &[u8],
+    ct_suffix: &[u8],
+    retry: u16,
+    prime_cache: Option<Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>>,
+    inplace: bool
+) -> Result<(Vec<u8>, Vec<u8>), DecryptError> {
+    let block_size = cradle_block.len();
+    let mut prime_generator = _make_prime(detector, &ct_prefix[ct_prefix.len() - block_size ..], &ct_prefix[..ct_prefix.len() - block_size], ct_suffix, retry, Some(MakePrimeOptions {
+        high_entropy: Some(true),
+        fixed_blk_pos: None,
+        valid_bytes: None,
+    }), prime_cache.clone());
+    // if inplace is set, just get c1 and c2 from the suffix
+    let (mut c1_prime, mut c2_prime) = match inplace {
+        false => prepare_c1_c2_prime(detector, ct_prefix, ct_suffix, retry, prime_cache.clone(), block_size).await?,
+        true => (ct_suffix[..block_size].to_vec(), ct_suffix[block_size..2*block_size].to_vec())
+    };
+    let ct_suffix = match inplace {
+        false => ct_suffix.to_vec(),
+        true => ct_suffix[2*block_size..].to_vec()
+        
+    };
     let mut cradle_indexes_to_set = (0..block_size).collect::<Vec<usize>>();
     while c1_prime != cradle_block {
         let mut new_c1_prime = c1_prime.clone();
@@ -617,7 +644,7 @@ pub async fn build_cradle_2(
                 &c1_prime,
                 &c2_prime,
                 ct_prefix,
-                ct_suffix,
+                &ct_suffix,
                 20,
             )
             .await
@@ -636,7 +663,7 @@ pub async fn build_cradle_2(
         if c1_prime == cradle_block {
             break;
         }
-        let suffix = [&c2_prime, ct_suffix].concat();
+        let suffix = [c2_prime.clone(), ct_suffix.clone()].concat();
         let mut fixed_pos = (0..block_size)
             .filter(|pos| !cradle_indexes_to_set.contains(pos))
             .collect::<Vec<usize>>();
@@ -674,7 +701,7 @@ pub async fn build_cradle_2(
             detector,
             &c2_prime.clone(),
             &prefix,
-            ct_suffix,
+            &ct_suffix,
             retry,
             None,
             prime_cache.clone(),
@@ -687,31 +714,23 @@ pub async fn build_cradle_2(
         }
     }
     let suffix = [c2_prime.clone(), ct_suffix.to_vec()].concat();
-    let mut cradle_left_generator = _make_prime(
-        detector,
-        &ct,
-        ct_prefix,
-        &suffix,
-        retry,
-        Some(MakePrimeOptions {
-            high_entropy: Some(true),
-            fixed_blk_pos: None,
-            valid_bytes: None,
-        }),
-        prime_cache.clone(),
-    );
+    
     for _ in 0..retry {
-        let maybe_cradle_left = cradle_left_generator.next().await.unwrap();
+        let maybe_cradle_left = prime_generator.next().await.unwrap();
         if maybe_cradle_left.is_none() {
             continue;
         }
         let maybe_cradle_left = maybe_cradle_left.unwrap();
+        let ct_prefix = match inplace {
+            false => ct_prefix.to_vec(),
+            true => ct_prefix[..ct_prefix.len() - block_size].to_vec()
+        };
         let test_ct = [
             ct_prefix,
-            &maybe_cradle_left,
-            &c1_prime,
-            &c2_prime,
-            ct_suffix,
+            maybe_cradle_left.clone(),
+            c1_prime.clone(),
+            c2_prime.clone(),
+            ct_suffix.clone(),
         ]
         .concat();
         if let Ok(res) = detector.check(&test_ct).await

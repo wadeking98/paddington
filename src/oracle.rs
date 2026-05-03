@@ -119,6 +119,7 @@ pub struct IntermediateOracle {
     detector: IntermediateDetector,
     block_size: usize,
     bad_chars: Vec<u8>,
+    inplace: bool
 }
 
 impl IntermediateOracle {
@@ -127,12 +128,14 @@ impl IntermediateOracle {
         tx: Sender<Messages>,
         block_size: usize,
         bad_chars: &[u8],
+        inplace:bool
     ) -> Self {
         return Self {
             tx,
             detector,
             block_size,
             bad_chars: bad_chars.to_vec(),
+            inplace
         };
     }
 }
@@ -152,7 +155,7 @@ impl Oracle for IntermediateOracle {
         let block_size = self.block_size;
         let cradles = Arc::new(Mutex::new(vec![None; chunks.len() - 1]));
         let mut cradle_futures = vec![];
-        let prime_cache = Arc::new(Mutex::new(HashMap::new()));
+        let prime_cache: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
         for i in 1..chunks.len() {
             let cradles = cradles.clone();
             let block_for_decryption = chunks[i].clone();
@@ -180,19 +183,24 @@ impl Oracle for IntermediateOracle {
                     &detector.block_suffix,
                     500,
                     Some(prime_cache),
+                    self.inplace
                 )
                 .await;
                 if let Ok(cradle) = cradle_res {
                     cradles.lock().await[i - 1] = Some(cradle.clone());
                     let _ = tx.send(Messages::FoundCradle).await;
+                    let (ct_prefix, ct_suffix) = match self.inplace {
+                        false => (detector.block_prefix.clone(), detector.block_suffix.clone()),
+                        true => (detector.block_prefix[..detector.block_prefix.len() - block_size].to_vec(), detector.block_suffix[2*block_size..].to_vec())
+                    };
                     let (pt, _) = decrypt_intermediate_block(
                         &detector,
                         &bad_chars,
                         &iv,
                         &cradle.0,
                         &block_for_decryption,
-                        &detector.block_prefix,
-                        &[cradle.1, detector.block_suffix.clone()].concat(),
+                        &ct_prefix,
+                        &[cradle.1, ct_suffix.clone()].concat(),
                         self.block_size,
                         msg_forwarder.local_tx.clone(),
                     )
@@ -235,6 +243,10 @@ impl Oracle for IntermediateOracle {
             .clone();
         let mut ct_buffer = block_for_decryption.clone();
         let prime_cache = Arc::new(Mutex::new(HashMap::new()));
+        let (ct_prefix, ct_suffix) = match self.inplace {
+            false => (self.detector.block_prefix.clone(), self.detector.block_suffix.clone()),
+            true => (self.detector.block_prefix[..self.detector.block_prefix.len() - block_size].to_vec(), self.detector.block_suffix[2*block_size..].to_vec())
+        };
         for i in (0..chunks.len()).rev() {
             let msg_forwarder = MessageForwarder::new(
                 self.tx.clone(),
@@ -253,6 +265,7 @@ impl Oracle for IntermediateOracle {
                 &self.detector.block_suffix,
                 500,
                 Some(prime_cache.clone()),
+                self.inplace
             )
             .await?;
             let _ = msg_forwarder.local_tx.send(Messages::FoundCradle).await;
@@ -262,8 +275,8 @@ impl Oracle for IntermediateOracle {
                 &vec![0u8; self.block_size],
                 &cradle.0,
                 &block_for_decryption,
-                &self.detector.block_prefix,
-                &[cradle.1, self.detector.block_suffix.clone()].concat(),
+                &ct_prefix,
+                &[cradle.1, ct_suffix.clone()].concat(),
                 self.block_size,
                 msg_forwarder.local_tx.clone(),
             )
@@ -281,10 +294,11 @@ impl Oracle for IntermediateOracle {
             &block_for_decryption,
             &self.detector.block_prefix,
             &self.detector.block_suffix,
-            1000,
+            500,
             Some(prime_cache.clone()),
+            self.inplace
         )
         .await?;
-        return Ok([self.detector.block_prefix.clone(), cradle.0, ct_buffer].concat());
+        return Ok([ct_prefix, cradle.0, ct_buffer].concat());
     }
 }
