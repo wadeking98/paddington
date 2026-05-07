@@ -100,68 +100,27 @@ pub async fn discover_bad_bytes(
     last_block: &[u8],
     retry: u16,
     tx: Sender<Messages>,
-    inplace: bool
+    inplace: bool,
+    null_padding: bool,
 ) -> Result<Vec<u8>, DecryptError> {
     let block_size = last_block.len();
-    let cradle = build_cradle_2(detector, last_block, ct_prefix, ct_suffix, 200, None, inplace).await?;
-    let (ct_prefix, ct_suffix) = match inplace{
+    let cradle = build_cradle_2(
+        detector, last_block, ct_prefix, ct_suffix, 200, None, inplace,
+    )
+    .await?;
+    let (ct_prefix, ct_suffix) = match inplace {
         false => (ct_prefix.to_vec(), ct_suffix.to_vec()),
-        true => (ct_prefix[..ct_prefix.len() - block_size].to_vec(), ct_suffix[2*block_size..].to_vec())
+        true => (
+            ct_prefix[..ct_prefix.len() - block_size].to_vec(),
+            ct_suffix[2 * block_size..].to_vec(),
+        ),
     };
     let _ = tx.send(Messages::FoundCradle).await;
-    let fingerprint_set = Arc::new(Mutex::new(vec![]));
-    let mut futures_set = vec![];
-    for _ in 0..10 {
-        let fingerprint_set = fingerprint_set.clone();
-        let cradle = cradle.clone();
-        let ct_prefix = ct_prefix.clone();
-        let ct_suffix = ct_suffix.clone();
-        futures_set.push(async move {
-            if let Ok(fingerprint) = gen_byte_fingerprint(
-                detector,
-                last_block.len() - 1,
-                &ct_prefix,
-                &ct_suffix,
-                &cradle.0,
-                &cradle.1,
-                second_last_block,
-                last_block,
-                retry,
-            )
-            .await
-            {
-                fingerprint_set.lock().await.push(fingerprint);
-            }
-        });
-    }
-    join_all(futures_set).await;
-    let fingerprint_set = fingerprint_set.lock().await.clone();
-    let mut distance_set = vec![];
-    let mut points_visited = vec![];
-    // generate a measure of how "close" two of the same byte fingerprints should be.
-    // a baseline is established by looking at the average fingerprint "distance"
-    for (i, fingerprint_1) in fingerprint_set.iter().enumerate() {
-        for fingerprint_2 in fingerprint_set
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| i != *j && !points_visited.contains(j))
-            .map(|(_, f)| f)
-        {
-            distance_set.push(compare_fingerprints(fingerprint_1, fingerprint_2));
-        }
-        points_visited.push(i);
-    }
-    let distance_floats: Vec<f64> = distance_set.iter().map(|d| *d as f64).collect();
-    let std_dev = distance_floats.clone().std_dev();
-    let mean = distance_floats.mean();
-
-    // use the standard deviation and mean to find outliers and calculate padding length
-    let fingerprint_compare = fingerprint_set[0].clone();
-    let mut padding_byte = last_block.len() as u8;
-    for i in 1..last_block.len() {
+    // skip the traditional padding
+    if null_padding {
         let fingerprint = gen_byte_fingerprint(
             detector,
-            last_block.len() - 1 - i,
+            block_size - 1,
             &ct_prefix,
             &ct_suffix,
             &cradle.0,
@@ -171,21 +130,86 @@ pub async fn discover_bad_bytes(
             retry,
         )
         .await?;
-        let distance = compare_fingerprints(&fingerprint, &fingerprint_compare);
-        if distance == 0
-            || (distance as f64) > mean + std_dev * 4.0
-            || (distance as f64) < mean - std_dev * 4.0
-        {
-            // found outlier
-            padding_byte = i as u8;
-            break;
+        return Ok(get_bad_bytes(vec![fingerprint], 0u8));
+    } else {
+        let fingerprint_set = Arc::new(Mutex::new(vec![]));
+        let mut futures_set = vec![];
+        for _ in 0..10 {
+            let fingerprint_set = fingerprint_set.clone();
+            let cradle = cradle.clone();
+            let ct_prefix = ct_prefix.clone();
+            let ct_suffix = ct_suffix.clone();
+            futures_set.push(async move {
+                if let Ok(fingerprint) = gen_byte_fingerprint(
+                    detector,
+                    last_block.len() - 1,
+                    &ct_prefix,
+                    &ct_suffix,
+                    &cradle.0,
+                    &cradle.1,
+                    second_last_block,
+                    last_block,
+                    retry,
+                )
+                .await
+                {
+                    fingerprint_set.lock().await.push(fingerprint);
+                }
+            });
         }
-    }
+        join_all(futures_set).await;
+        let fingerprint_set = fingerprint_set.lock().await.clone();
+        let mut distance_set = vec![];
+        let mut points_visited = vec![];
+        // generate a measure of how "close" two of the same byte fingerprints should be.
+        // a baseline is established by looking at the average fingerprint "distance"
+        for (i, fingerprint_1) in fingerprint_set.iter().enumerate() {
+            for fingerprint_2 in fingerprint_set
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| i != *j && !points_visited.contains(j))
+                .map(|(_, f)| f)
+            {
+                distance_set.push(compare_fingerprints(fingerprint_1, fingerprint_2));
+            }
+            points_visited.push(i);
+        }
+        let distance_floats: Vec<f64> = distance_set.iter().map(|d| *d as f64).collect();
+        let std_dev = distance_floats.clone().std_dev();
+        let mean = distance_floats.mean();
 
-    // convert fingerprint to byte string
-    let mut bad_bytes = get_bad_bytes(fingerprint_set, padding_byte);
-    bad_bytes.sort();
-    return Ok(bad_bytes);
+        // use the standard deviation and mean to find outliers and calculate padding length
+        let fingerprint_compare = fingerprint_set[0].clone();
+        let mut padding_byte = last_block.len() as u8;
+        for i in 1..last_block.len() {
+            let fingerprint = gen_byte_fingerprint(
+                detector,
+                last_block.len() - 1 - i,
+                &ct_prefix,
+                &ct_suffix,
+                &cradle.0,
+                &cradle.1,
+                second_last_block,
+                last_block,
+                retry,
+            )
+            .await?;
+            let distance = compare_fingerprints(&fingerprint, &fingerprint_compare);
+            if distance == 0
+                || (distance as f64) > mean + std_dev * 4.0
+                || (distance as f64) < mean - std_dev * 4.0
+            {
+                // found outlier
+                padding_byte = i as u8;
+                break;
+            }
+        }
+
+        // convert fingerprint to byte string
+        let mut bad_bytes = get_bad_bytes(fingerprint_set, padding_byte);
+        bad_bytes.sort();
+        return Ok(bad_bytes);
+    }
 }
 
 pub async fn check_byte_creates_invalid_pt(
@@ -562,7 +586,14 @@ pub fn _make_prime(
     return Box::pin(stream);
 }
 
-async fn prepare_c1_c2_prime(detector: &IntermediateDetector, ct_prefix: &[u8], ct_suffix: &[u8], retry: u16, prime_cache: Option<Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>>, block_size: usize) -> Result<(Vec<u8>,Vec<u8>), DecryptError>{
+async fn prepare_c1_c2_prime(
+    detector: &IntermediateDetector,
+    ct_prefix: &[u8],
+    ct_suffix: &[u8],
+    retry: u16,
+    prime_cache: Option<Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>>,
+    block_size: usize,
+) -> Result<(Vec<u8>, Vec<u8>), DecryptError> {
     let ct = ct_prefix[ct_prefix.len() - block_size..].to_vec();
     let c2_prime = _make_prime(
         detector,
@@ -571,7 +602,7 @@ async fn prepare_c1_c2_prime(detector: &IntermediateDetector, ct_prefix: &[u8], 
         ct_suffix,
         retry,
         None,
-        prime_cache.clone()
+        prime_cache.clone(),
     )
     .next()
     .await
@@ -614,23 +645,43 @@ pub async fn build_cradle_2(
     ct_suffix: &[u8],
     retry: u16,
     prime_cache: Option<Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>>,
-    inplace: bool
+    inplace: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), DecryptError> {
     let block_size = cradle_block.len();
-    let mut prime_generator = _make_prime(detector, &ct_prefix[ct_prefix.len() - block_size ..], &ct_prefix[..ct_prefix.len() - block_size], ct_suffix, retry, Some(MakePrimeOptions {
-        high_entropy: Some(true),
-        fixed_blk_pos: None,
-        valid_bytes: None,
-    }), prime_cache.clone());
+    let mut prime_generator = _make_prime(
+        detector,
+        &ct_prefix[ct_prefix.len() - block_size..],
+        &ct_prefix[..ct_prefix.len() - block_size],
+        ct_suffix,
+        retry,
+        Some(MakePrimeOptions {
+            high_entropy: Some(true),
+            fixed_blk_pos: None,
+            valid_bytes: None,
+        }),
+        prime_cache.clone(),
+    );
     // if inplace is set, just get c1 and c2 from the suffix
     let (mut c1_prime, mut c2_prime) = match inplace {
-        false => prepare_c1_c2_prime(detector, ct_prefix, ct_suffix, retry, prime_cache.clone(), block_size).await?,
-        true => (ct_suffix[..block_size].to_vec(), ct_suffix[block_size..2*block_size].to_vec())
+        false => {
+            prepare_c1_c2_prime(
+                detector,
+                ct_prefix,
+                ct_suffix,
+                retry,
+                prime_cache.clone(),
+                block_size,
+            )
+            .await?
+        }
+        true => (
+            ct_suffix[..block_size].to_vec(),
+            ct_suffix[block_size..2 * block_size].to_vec(),
+        ),
     };
     let ct_suffix = match inplace {
         false => ct_suffix.to_vec(),
-        true => ct_suffix[2*block_size..].to_vec()
-        
+        true => ct_suffix[2 * block_size..].to_vec(),
     };
     let mut cradle_indexes_to_set = (0..block_size).collect::<Vec<usize>>();
     while c1_prime != cradle_block {
@@ -713,8 +764,7 @@ pub async fn build_cradle_2(
             c2_prime = new_c2;
         }
     }
-    let suffix = [c2_prime.clone(), ct_suffix.to_vec()].concat();
-    
+
     for _ in 0..retry {
         let maybe_cradle_left = prime_generator.next().await.unwrap();
         if maybe_cradle_left.is_none() {
@@ -723,7 +773,7 @@ pub async fn build_cradle_2(
         let maybe_cradle_left = maybe_cradle_left.unwrap();
         let ct_prefix = match inplace {
             false => ct_prefix.to_vec(),
-            true => ct_prefix[..ct_prefix.len() - block_size].to_vec()
+            true => ct_prefix[..ct_prefix.len() - block_size].to_vec(),
         };
         let test_ct = [
             ct_prefix,

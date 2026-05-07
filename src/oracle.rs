@@ -119,7 +119,9 @@ pub struct IntermediateOracle {
     detector: IntermediateDetector,
     block_size: usize,
     bad_chars: Vec<u8>,
-    inplace: bool
+    inplace: bool,
+    null_padding: bool,
+    forge_calc_prefix: bool,
 }
 
 impl IntermediateOracle {
@@ -128,14 +130,18 @@ impl IntermediateOracle {
         tx: Sender<Messages>,
         block_size: usize,
         bad_chars: &[u8],
-        inplace:bool
+        inplace: bool,
+        null_padding: bool,
+        forge_calc_prefix: bool,
     ) -> Self {
         return Self {
             tx,
             detector,
             block_size,
             bad_chars: bad_chars.to_vec(),
-            inplace
+            inplace,
+            null_padding,
+            forge_calc_prefix,
         };
     }
 }
@@ -155,7 +161,8 @@ impl Oracle for IntermediateOracle {
         let block_size = self.block_size;
         let cradles = Arc::new(Mutex::new(vec![None; chunks.len() - 1]));
         let mut cradle_futures = vec![];
-        let prime_cache: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let prime_cache: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         for i in 1..chunks.len() {
             let cradles = cradles.clone();
             let block_for_decryption = chunks[i].clone();
@@ -183,7 +190,7 @@ impl Oracle for IntermediateOracle {
                     &detector.block_suffix,
                     500,
                     Some(prime_cache),
-                    self.inplace
+                    self.inplace,
                 )
                 .await;
                 if let Ok(cradle) = cradle_res {
@@ -191,7 +198,11 @@ impl Oracle for IntermediateOracle {
                     let _ = tx.send(Messages::FoundCradle).await;
                     let (ct_prefix, ct_suffix) = match self.inplace {
                         false => (detector.block_prefix.clone(), detector.block_suffix.clone()),
-                        true => (detector.block_prefix[..detector.block_prefix.len() - block_size].to_vec(), detector.block_suffix[2*block_size..].to_vec())
+                        true => (
+                            detector.block_prefix[..detector.block_prefix.len() - block_size]
+                                .to_vec(),
+                            detector.block_suffix[2 * block_size..].to_vec(),
+                        ),
                     };
                     let (pt, _) = decrypt_intermediate_block(
                         &detector,
@@ -227,11 +238,15 @@ impl Oracle for IntermediateOracle {
             .collect::<Vec<Vec<u8>>>();
         // add padding
         if let Some(last_chunk) = chunks.last_mut() {
-            if self.block_size == last_chunk.len() {
+            if self.block_size == last_chunk.len() && !self.null_padding {
                 chunks.push(vec![self.block_size as u8; self.block_size]);
             } else {
                 let padding = self.block_size - last_chunk.len();
-                last_chunk.append(&mut vec![padding as u8; padding]);
+                let padding_byte = match self.null_padding {
+                    false => padding as u8,
+                    true => 0u8,
+                };
+                last_chunk.append(&mut vec![padding_byte as u8; padding]);
             }
         }
         // this can be anything to start off with
@@ -244,8 +259,15 @@ impl Oracle for IntermediateOracle {
         let mut ct_buffer = block_for_decryption.clone();
         let prime_cache = Arc::new(Mutex::new(HashMap::new()));
         let (ct_prefix, ct_suffix) = match self.inplace {
-            false => (self.detector.block_prefix.clone(), self.detector.block_suffix.clone()),
-            true => (self.detector.block_prefix[..self.detector.block_prefix.len() - block_size].to_vec(), self.detector.block_suffix[2*block_size..].to_vec())
+            false => (
+                self.detector.block_prefix.clone(),
+                self.detector.block_suffix.clone(),
+            ),
+            true => (
+                self.detector.block_prefix[..self.detector.block_prefix.len() - block_size]
+                    .to_vec(),
+                self.detector.block_suffix[2 * block_size..].to_vec(),
+            ),
         };
         for i in (0..chunks.len()).rev() {
             let msg_forwarder = MessageForwarder::new(
@@ -265,7 +287,7 @@ impl Oracle for IntermediateOracle {
                 &self.detector.block_suffix,
                 500,
                 Some(prime_cache.clone()),
-                self.inplace
+                self.inplace,
             )
             .await?;
             let _ = msg_forwarder.local_tx.send(Messages::FoundCradle).await;
@@ -289,16 +311,20 @@ impl Oracle for IntermediateOracle {
                 .collect::<Vec<u8>>();
             ct_buffer = [block_for_decryption.clone(), ct_buffer].concat();
         }
-        let cradle = build_cradle_2(
-            &self.detector,
-            &block_for_decryption,
-            &self.detector.block_prefix,
-            &self.detector.block_suffix,
-            500,
-            Some(prime_cache.clone()),
-            self.inplace
-        )
-        .await?;
-        return Ok([ct_prefix, cradle.0, ct_buffer].concat());
+        if self.forge_calc_prefix {
+            let cradle = build_cradle_2(
+                &self.detector,
+                &block_for_decryption,
+                &self.detector.block_prefix,
+                &self.detector.block_suffix,
+                500,
+                Some(prime_cache.clone()),
+                self.inplace,
+            )
+            .await?;
+            return Ok([ct_prefix, cradle.0, ct_buffer].concat());
+        } else {
+            return Ok(ct_buffer);
+        }
     }
 }

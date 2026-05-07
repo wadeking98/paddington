@@ -2,14 +2,13 @@ use std::io::{self, Write};
 
 use clap::{Parser, ValueEnum};
 use colored::Colorize;
-use futures::StreamExt;
 use regex::Regex;
 use strum_macros::Display;
 use tokio::sync::mpsc;
 
 use crate::{
     crypt::{
-        cradlehelpers::{_make_prime, build_cradle_2, discover_bad_bytes},
+        cradlehelpers::discover_bad_bytes,
         detector::{IntermediateDetector, SimpleDetector, find_baseline_response},
     },
     helper::{Config, Encoding, decode_ct, encode_ct, parse_bad_chars},
@@ -120,7 +119,16 @@ struct Args {
     ///perform the intermediate oracle attack in place without adding any additional blocks. Note the injection point must be at least 3 blocks from the end
     /// to give enough room to build the cradle and perform the attack
     #[arg(long, default_value_t = false)]
-    inplace: bool
+    inplace: bool,
+
+    ///detect bad bytes assuming the text is using null byte padding instead of the standard PKCS#7
+    #[arg(long, default_value_t = false)]
+    null_padding: bool,
+
+    /// when forging on an intermediate oracle, find a valid prefix. Otherwise if you attempt to place the forged ciphertext back in the original ciphertext it will
+    /// likely cause a bad character error.
+    #[arg(long, default_value_t = false)]
+    forge_calc_prefix: bool,
 }
 
 #[tokio::main]
@@ -289,13 +297,13 @@ async fn main() {
                 baseline.clone(),
                 search_pat.clone(),
                 args.intermediate_block_index.clone(),
-                args.inplace
+                args.inplace,
             )
             .await;
             if let Ok(detector) = detect {
                 println!("{}", "Intermediate Oracle Detected".green());
                 //if attack style is in place, make sure there's enough room after the injection point
-                if detector.block_suffix.len() < 3 * (*block_size as usize) && args.inplace{
+                if detector.block_suffix.len() < 3 * (*block_size as usize) && args.inplace {
                     println!("{}", "Not enough space to perform in place attack".red());
                     return;
                 }
@@ -326,6 +334,7 @@ async fn main() {
                         20,
                         tx.clone(),
                         args.inplace,
+                        args.null_padding,
                     )
                     .await;
 
@@ -344,8 +353,15 @@ async fn main() {
                     return;
                 }
 
-                let intermediate_oracle =
-                    IntermediateOracle::new(detector.clone(), tx, *block_size as usize, &bad_chars, args.inplace);
+                let intermediate_oracle = IntermediateOracle::new(
+                    detector.clone(),
+                    tx,
+                    *block_size as usize,
+                    &bad_chars,
+                    args.inplace,
+                    args.null_padding,
+                    args.forge_calc_prefix,
+                );
                 if let Some(ref pt) = args.forge {
                     let ct = intermediate_oracle.forge(&standard_ct, pt.as_bytes()).await;
                     if let Ok(ct) = ct {

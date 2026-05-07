@@ -53,7 +53,7 @@ impl IntermediateDetector {
         baseline: Option<String>,
         search_pat: Option<Regex>,
         intermediate_block_index: Option<usize>,
-        inplace: bool
+        inplace: bool,
     ) -> Result<Self, DecryptError>
     where
         Self: Sized,
@@ -71,28 +71,28 @@ impl IntermediateDetector {
         }
         let mut found_transport: Option<(SimpleDetector, Vec<u8>, Vec<u8>)> = None;
         let search_range;
-        if let Some(i) = intermediate_block_index{
-            search_range = i..i+1;
-        }else{
+        if let Some(i) = intermediate_block_index {
+            search_range = i..i + 1;
+        } else {
             search_range = 0..blocks.len();
         }
         for i in search_range {
             let retry = 20;
             for r in 1..retry {
                 let index_offset: usize;
-                if inplace{
+                if inplace {
                     index_offset = 0;
-                }else{
+                } else {
                     index_offset = 1;
                 }
-                let ct_prefix = ct[..(i+index_offset) * blk_size].to_vec();
+                let ct_prefix = ct[..(i + index_offset) * blk_size].to_vec();
                 let ct_suffix;
-                if (i + 2) * blk_size > ct.len()-1{
+                if (i + 2) * blk_size > ct.len() - 1 {
                     ct_suffix = vec![];
-                }else{
+                } else {
                     ct_suffix = ct[(i + 2) * blk_size..].to_vec();
                 }
-                let mut inter_ct = [blocks[i].clone(), blocks[i+1].clone()].concat();
+                let mut inter_ct = [blocks[i].clone(), blocks[i + 1].clone()].concat();
                 //scramble the inter ciphertext block in such a way it doesn't affect the suffix much
                 inter_ct[0] = inter_ct[0] ^ r as u8;
                 let res = _detect(
