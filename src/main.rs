@@ -11,7 +11,7 @@ use crate::{
         cradlehelpers::discover_bad_bytes,
         detector::{IntermediateDetector, SimpleDetector, find_baseline_response},
     },
-    helper::{Config, Encoding, decode_ct, encode_ct, parse_bad_chars},
+    helper::{Config, Encoding, decode_ct, encode_ct, unescape},
     oracle::{DoubleOracle, IntermediateOracle, Oracle, SingleOracle},
     print::{fmt_bytes_custom, progress_bar},
     transport::HTTPTransport,
@@ -129,6 +129,10 @@ struct Args {
     /// likely cause a bad character error.
     #[arg(long, default_value_t = false)]
     forge_calc_prefix: bool,
+
+    /// when decrypting, output the final decrypted string as hex-encoded bytes
+    #[arg(long, default_value_t = false)]
+    hex_output: bool,
 }
 
 #[tokio::main]
@@ -191,13 +195,14 @@ async fn main() {
         }
 
         let baseline =
-            find_baseline_response(&standard_ct, standard_transport.clone(), search_pat.clone())
+            find_baseline_response(&standard_ct, standard_transport.clone(), search_pat.clone(), args.threads)
                 .await
                 .ok();
 
         // find ct_len for the progress bar
         let mut ct_len = standard_ct.len() - *block_size as usize;
         if let Some(ref pt) = args.forge {
+            let pt = unescape(pt.to_owned());
             ct_len = ((pt.len() / *block_size as usize) + 1) * *block_size as usize;
         } else {
             if let Some(ref ct_override) = args.ciphertext {
@@ -223,10 +228,11 @@ async fn main() {
             if let Ok(detector) = detect {
                 println!("{}", "Standard Oracle Detected".green());
                 let (tx, rx) = mpsc::channel(255);
-                let close_progress = progress_bar(ct_len, rx);
+                let close_progress = progress_bar(ct_len, *block_size as usize, rx);
                 let oracle = SingleOracle::new(detector, tx, *block_size as usize, args.retry);
                 if let Some(ref pt) = args.forge {
-                    let ct = oracle.forge(&standard_ct, pt.as_bytes()).await;
+                    let pt = unescape(pt.to_owned());
+                    let ct = oracle.forge(&standard_ct, &pt).await;
                     if let Ok(ct) = ct {
                         close_progress();
                         println!(
@@ -239,7 +245,7 @@ async fn main() {
                     let pt = oracle.decrypt(&ciphertext).await;
                     if let Ok(pt) = pt {
                         close_progress();
-                        println!("plaintext {:?}", fmt_bytes_custom(&pt));
+                        println!("plaintext {:?}", fmt_bytes_custom(&pt, args.hex_output));
                         return;
                     }
                 }
@@ -262,11 +268,12 @@ async fn main() {
             if let Ok(detector) = detect {
                 println!("{}", "Double Oracle Detected".green());
                 let (tx, rx) = mpsc::channel(255);
-                let close_progress = progress_bar(ct_len, rx);
+                let close_progress = progress_bar(ct_len, *block_size as usize,rx);
                 let double_oracle =
                     DoubleOracle::new(detector, tx, &standard_ct, *block_size as usize, args.retry);
                 if let Some(ref pt) = args.forge {
-                    let ct = double_oracle.forge(&standard_ct, pt.as_bytes()).await;
+                    let pt = unescape(pt.to_owned());
+                    let ct = double_oracle.forge(&standard_ct, &pt).await;
                     if let Ok(ct) = ct {
                         close_progress();
                         println!(
@@ -279,7 +286,7 @@ async fn main() {
                     let pt = double_oracle.decrypt(&ciphertext).await;
                     if let Ok(pt) = pt {
                         close_progress();
-                        println!("plaintext {:?}", fmt_bytes_custom(&pt));
+                        println!("plaintext {:?}", fmt_bytes_custom(&pt, args.hex_output));
                         return;
                     }
                 }
@@ -307,9 +314,9 @@ async fn main() {
                     println!("{}", "Not enough space to perform in place attack".red());
                     return;
                 }
-                let bad_chars = parse_bad_chars(args.bad_chars);
+                let bad_chars = unescape(args.bad_chars.unwrap_or(String::from("")));
                 let (tx, rx) = mpsc::channel(255);
-                let close_progress = progress_bar(ct_len, rx);
+                let close_progress = progress_bar(ct_len, *block_size as usize ,rx);
                 //no bad chars provided, detect them
                 if bad_chars.len() <= 0 {
                     print!("\r\x1B[2K");
@@ -341,7 +348,7 @@ async fn main() {
                     if let Ok(bad_bytes) = bad_bytes_res {
                         print!("\r\x1B[2K");
                         io::stdout().flush().unwrap();
-                        println!("{} {} '{}' \r\n{}", "Automatically discovered bad bytes!".green(), "Re-run the paddington with the flag --bad-chars", fmt_bytes_custom(&bad_bytes), "Note some of these characters may be false positives or may only be bad characters in certain situations such as the '\\' character. \r\nGenerally you will want to exclude the '\\' character since it may or may not be a bad character depending on which character comes after it in the plaintext".yellow());
+                        println!("{} {} '{}' \r\n{}", "Automatically discovered bad bytes!".green(), "Re-run the paddington with the flag --bad-chars", fmt_bytes_custom(&bad_bytes, false), "Note some of these characters may be false positives or may only be bad characters in certain situations such as the '\\' character. \r\nGenerally you will want to exclude the '\\' character since it may or may not be a bad character depending on which character comes after it in the plaintext".yellow());
                     } else {
                         print!("\r\x1B[2K");
                         io::stdout().flush().unwrap();
@@ -363,7 +370,8 @@ async fn main() {
                     args.forge_calc_prefix,
                 );
                 if let Some(ref pt) = args.forge {
-                    let ct = intermediate_oracle.forge(&standard_ct, pt.as_bytes()).await;
+                    let pt = unescape(pt.to_owned());
+                    let ct = intermediate_oracle.forge(&standard_ct, &pt).await;
                     if let Ok(ct) = ct {
                         close_progress();
                         println!(
@@ -376,7 +384,7 @@ async fn main() {
                     let pt = intermediate_oracle.decrypt(&ciphertext).await;
                     if let Ok(pt) = pt {
                         close_progress();
-                        println!("plaintext {:?}", fmt_bytes_custom(&pt));
+                        println!("plaintext {:?}", fmt_bytes_custom(&pt, args.hex_output));
                         return;
                     }
                 }
@@ -384,87 +392,5 @@ async fn main() {
                 println!("No Intermediate Oracle Detected");
             }
         }
-
-        // let double_oracle = Box::new(HTTPDoubleOracle::new(
-        //     args.url,
-        //     headers,
-        //     args.method.unwrap_or(Method::GET),
-        //     args.data,
-        //     encoding.clone(),
-        //     args.params,
-        //     args.search_pat,
-        //     args.proxy,
-        // ));
-        // let double_ct = double_oracle.base_ct.clone();
-
-        // let mut oracles: Vec<(Box<dyn Oracle>, Vec<u8>, String)> = vec![];
-
-        // if args.attack == Attack::ALL || args.attack == Attack::SINGLE {
-        //     oracles.push((
-        //         standard_oracle,
-        //         standard_ct,
-        //         String::from("\nTesting standard padding oracle, block size: ".to_owned()+&block_size.to_string()),
-        //     ));
-        // }
-        // if args.attack == Attack::ALL || args.attack == Attack::DOUBLE {
-        //     oracles.push((
-        //         double_oracle,
-        //         double_ct,
-        //         String::from("\nTesting double padding oracle, block size: ".to_owned()+&block_size.to_string()),
-        //     ));
-        // }
-
-        // // find ct_len for the progress bar
-        // let mut ct_len = oracles[0].1.len() - *block_size as usize;
-        // if let Some(ref pt) = args.forge {
-        //     ct_len = ((pt.len() / *block_size as usize) + 1) * *block_size as usize;
-        // } else {
-        //     if let Some(ref ct_override) = args.ciphertext {
-        //         ct_len = decode_ct(ct_override.to_string(), encoding.clone()).len() - *block_size as usize;
-        //     }
-        //     if let Some(ref iv) = args.iv {
-        //         ct_len += decode_ct(iv.to_string(), encoding.clone()).len()
-        //     }
-        // }
-
-        // // this section runs the padding oracle attack
-        // for (oracle, base_ct, log) in oracles {
-        //     // this section here is just to print the progress bar
-        //     let (tx, rx) = mpsc::channel::<Messages>(255);
-        //     progress_bar(ct_len, rx);
-        //     println!("\n{}", log);
-        //     let mut ct = base_ct.clone();
-        //     if let Some(override_ct) = args.ciphertext.clone() {
-        //         ct = decode_ct(override_ct, encoding.clone());
-        //     }
-        //     if let Some(iv) = args.iv.clone() {
-        //         let iv = decode_ct(iv, encoding.clone());
-        //         ct = iv.iter().chain(ct.iter()).cloned().collect();
-        //     }
-        //     if let Some(forge_string) = args.forge.clone() {
-        //         let result = padding_oracle_forge(
-        //             forge_string.as_bytes(),
-        //             &ct.clone(),
-        //             oracle,
-        //             tx.clone(),
-        //             config.clone(),
-        //         )
-        //         .await;
-        //         if let Ok(ct) = result {
-        //             println!(
-        //                 "\nforged ciphertext: {}",
-        //                 encode_ct(&ct, encoding)
-        //                     .expect("Error: forged ciphertext cannot be displayed as utf-8")
-        //             );
-        //             return;
-        //         }
-        //     } else {
-        //         let res = padding_oracle_decrypt(&ct.clone(), oracle, tx.clone(), config.clone()).await;
-        //         if let Ok(res) = res {
-        //             println!("\nplaintext: {}", fmt_bytes_custom(&res));
-        //             return;
-        //         }
-        //     }
-        // }
     }
 }

@@ -160,10 +160,10 @@ impl Oracle for IntermediateOracle {
         ]));
         let block_size = self.block_size;
         let cradles = Arc::new(Mutex::new(vec![None; chunks.len() - 1]));
-        let mut cradle_futures = vec![];
+        //let mut cradle_futures = vec![];
         let prime_cache: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        for i in 1..chunks.len() {
+        for i in (1..chunks.len()).rev() {
             let cradles = cradles.clone();
             let block_for_decryption = chunks[i].clone();
             let detector = self.detector.clone();
@@ -182,7 +182,8 @@ impl Oracle for IntermediateOracle {
                     other => other,
                 }),
             );
-            cradle_futures.push(async move {
+            // do this in sync instead of async, it's better for UX
+            //cradle_futures.push(async move {
                 let cradle_res = build_cradle_2(
                     &detector,
                     &block_for_decryption,
@@ -222,9 +223,9 @@ impl Oracle for IntermediateOracle {
                 } else {
                     println!("{:?}", cradle_res.err())
                 }
-            });
+            //});
         }
-        join_all(cradle_futures).await;
+        //join_all(cradle_futures).await;
 
         return Ok(pt_buffer.lock().await.concat());
     }

@@ -144,12 +144,6 @@ impl Transport for HTTPTransport {
             .await
             .expect("Error: could not convert response body to text");
         response_text += &response_body;
-        // if let Some(search) = &self.search_pat {
-        //     return match search.find(&response_text) {
-        //         Some(_) => String::from("matches"),
-        //         None => String::from("no match"),
-        //     };
-        // }
         return Ok(response_text);
     }
 }
@@ -164,14 +158,6 @@ impl HTTPTransport {
         params: Vec<String>,
         proxy: Option<String>,
     ) -> Self {
-        // let mut pat = None;
-        // if let Some(search_pat) = search_pat {
-        //     let re = RegexBuilder::new(&search_pat)
-        //         .multi_line(true)
-        //         .build()
-        //         .expect(&("Error: Failed to compile regex ".to_owned() + &search_pat));
-        //     pat = Some(re);
-        // }
         let mut prox = None;
         if let Some(p) = proxy {
             prox = Some(Proxy::all(p).expect("Error: Invalid proxy"));

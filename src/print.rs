@@ -16,10 +16,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::helper::Messages;
 
-pub fn fmt_bytes_custom(bytes: &[u8]) -> String {
+pub fn fmt_bytes_custom(bytes: &[u8], hex_output: bool) -> String {
     let mut base = String::new();
     for &byte in bytes {
-        if byte.is_ascii_graphic() || byte == 32 {
+        if hex_output{
+            base += format!("{:02X}", byte).as_str();
+        } else if byte.is_ascii_alphanumeric() || byte.is_ascii_punctuation() || byte == 0x20 {
             // Cast to char for printing as a character
             base += format!("{}", byte as char).as_str();
         } else {
@@ -31,7 +33,8 @@ pub fn fmt_bytes_custom(bytes: &[u8]) -> String {
 }
 
 ///displays a progress bar to the terminal. updates to the bytes are received from rx
-pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) -> impl Fn() {
+pub fn progress_bar(ct_len: usize, block_len: usize, mut rx: Receiver<Messages>) -> impl Fn() {
+    let num_blocks = ct_len / block_len;
     let curr_results: Vec<u8> = vec![b'-'; ct_len];
     let curr_results_modified: Vec<bool> = vec![false; ct_len];
     let loading_map = HashMap::from([(b'|', b'/'), (b'/', b'-'), (b'-', b'\\'), (b'\\', b'|')]);
@@ -43,6 +46,7 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) -> impl Fn() {
     let token = CancellationToken::new();
     let cloned_token = token.clone();
     let handle1 = spawn(async move {
+        let mut cradle_counter = 0usize;
         loop {
             let msg = rx.recv().await;
             if let Some(msg) = msg {
@@ -63,9 +67,14 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) -> impl Fn() {
                         return;
                     }
                     Messages::FoundCradle => {
-                        print!("\r\x1B[2K");
+                        cradle_counter += 1;
+                        if cradle_counter <= 1{
+                            print!("\r\x1B[2K");
+                        }else{
+                            print!("\r\x1B[1A\x1B[2K");
+                        }
                         io::stdout().flush().unwrap();
-                        println!("{}", "Found Cradle!".green());
+                        println!("{} {}/{}", "Found Cradle!".green(), cradle_counter, num_blocks);
                     }
                     _ => (),
                 };
@@ -98,7 +107,7 @@ pub fn progress_bar(ct_len: usize, mut rx: Receiver<Messages>) -> impl Fn() {
 
             let end = min((working_chunk + 1) * truncate_len, curr_results.len());
             let curr_results_slice = &curr_results[working_chunk * truncate_len..end];
-            let byte_string = fmt_bytes_custom(&curr_results_slice);
+            let byte_string = fmt_bytes_custom(&curr_results_slice, false);
             print!("\r\x1B[2K");
             io::stdout().flush().unwrap();
             print!("{}", byte_string);

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{collections::HashMap, error::Error, sync::{Arc, atomic::AtomicBool}};
 
 use async_trait::async_trait;
 use futures::future::join_all;
@@ -169,7 +169,7 @@ impl SimpleDetector {
 #[async_trait]
 impl Detector for SimpleDetector {
     async fn check(&self, ct: &[u8]) -> Result<DETECT, DecryptError> {
-        let sem_acquire = self
+        let sem = self
             .semaphore
             .acquire()
             .await
@@ -184,34 +184,58 @@ impl Detector for SimpleDetector {
                 res = DETECT::OUTLIER
             }
         }
-        drop(sem_acquire);
+        drop(sem);
         return Ok(res);
     }
 }
 
 pub async fn find_baseline_response(
     ct: &[u8],
-    transport: impl Transport,
+    transport: impl Transport + Clone,
     search_pat: Option<Regex>,
+    threads: usize,
 ) -> Result<String, Box<dyn Error + Send>> {
-    let mut prev_result = None;
+    let semaphore =  Arc::new(Semaphore::new(threads));
+    let prev_result = Arc::new(Mutex::new(None));
+    let found_err = Arc::new(AtomicBool::new(false));
+    let mut futures = vec![];
     for _ in 0..10 {
-        let response;
-        let response_raw = transport.exec(ct, None, None).await?;
-        if let Some(ref pat) = search_pat {
-            response = pat.is_match(&response_raw).to_string();
-        } else {
-            response = response_raw;
-        }
-        if let Some(prev) = prev_result
-            && prev != response
-        {
-            return Err(Box::new(DecryptError::BaselineError()));
-        } else {
-            prev_result = Some(response);
-        }
+        let prev_result = prev_result.clone();
+        let transport = transport.clone();
+        let search_pat = search_pat.clone();
+        let found_err = found_err.clone();
+        let semaphore = semaphore.clone();
+        futures.push(async move{
+            let sem = semaphore.acquire().await.expect("Error: semaphore closed");
+            let response;
+            let response_raw = transport.exec(ct, None, None).await;
+            drop(sem);
+            if response_raw.is_err(){
+                found_err.store(true, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+            let response_raw = response_raw.unwrap();
+            if let Some(ref pat) = search_pat {
+                response = pat.is_match(&response_raw).to_string();
+            } else {
+                response = response_raw;
+            }
+            let mut prev_result = prev_result.lock().await;
+            if let Some(prev) = (*prev_result).clone()
+                && prev != response
+            {
+                found_err.store(true, std::sync::atomic::Ordering::SeqCst);
+                return;
+            } else {
+                *prev_result = Some(response);
+            }
+        });
     }
-    return Ok(prev_result.unwrap());
+    let _ = join_all(futures).await;
+    if found_err.load(std::sync::atomic::Ordering::SeqCst){
+        return Err(Box::new(DecryptError::BaselineError()));
+    }
+    return Ok(prev_result.lock().await.as_ref().unwrap().to_owned());
 }
 
 async fn _detect(
@@ -260,9 +284,8 @@ async fn _detect(
         let semaphore = semaphore.clone();
         futures_set.push(async move {
             last_blocks[0][blk_size as usize - 1] = i;
-            let sem_acquire = semaphore
-                .clone()
-                .acquire_owned()
+            let sem = semaphore
+                .acquire()
                 .await
                 .expect("Error: semaphore closed");
             let response_result = transport
@@ -272,7 +295,7 @@ async fn _detect(
                     ct_suffix_copy,
                 )
                 .await;
-            drop(sem_acquire);
+            drop(sem);
             if let Ok(response) = response_result {
                 let response_key;
                 if let Some(search) = search_pat {

@@ -207,8 +207,7 @@ pub fn set_injection_points(transport: &mut HTTPTransport) -> Option<String> {
     return found_ct;
 }
 
-pub fn parse_bad_chars(bad_chars: Option<String>) -> Vec<u8> {
-    if let Some(char_str) = bad_chars {
+pub fn unescape(char_str: String) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut chars = char_str.chars().peekable();
 
@@ -228,6 +227,4 @@ pub fn parse_bad_chars(bad_chars: Option<String>) -> Vec<u8> {
             }
         }
         return bytes;
-    }
-    return vec![];
 }
