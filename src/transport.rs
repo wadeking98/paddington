@@ -82,6 +82,7 @@ impl Transport for HTTPTransport {
         let url = self.url.replace(&injection_point, &modified_ct);
 
         let mut client_builder = Client::builder()
+            .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(10))
             .redirect(Policy::none())
             .http1_title_case_headers();
