@@ -308,7 +308,7 @@ async fn main() {
             )
             .await;
             if let Ok(detector) = detect {
-                println!("{}", "Intermediate Oracle Detected".green());
+                println!("{} {}", "Intermediate Oracle Detected at Block Index".green(), detector.block_prefix.len()/(*block_size) as usize);
                 //if attack style is in place, make sure there's enough room after the injection point
                 if detector.block_suffix.len() < 3 * (*block_size as usize) && args.inplace {
                     println!("{}", "Not enough space to perform in place attack".red());
