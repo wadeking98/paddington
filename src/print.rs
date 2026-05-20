@@ -82,7 +82,7 @@ pub fn progress_bar(ct_len: usize, block_len: usize, mut rx: Receiver<Messages>)
         }
     });
     let handle2 = spawn(async move {
-        let truncate_len = 64;
+        let truncate_len = 32;
         loop {
             select! {
                 _ = sleep(Duration::from_millis(250)) =>{},

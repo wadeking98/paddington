@@ -69,14 +69,19 @@ impl IntermediateDetector {
                 "Not enough blocks for classic attack".into(),
             ));
         }
-        let mut found_transport: Option<(SimpleDetector, Vec<u8>, Vec<u8>)> = None;
+        let mut found_detector: Option<(SimpleDetector, Vec<u8>, Vec<u8>)> = None;
         let search_range;
         if let Some(i) = intermediate_block_index {
             search_range = i..i + 1;
         } else {
             search_range = 0..blocks.len();
         }
+        // use some randomness here so we can build a picture of dif regions
         for i in search_range {
+            // make sure we have enough room in blocks
+            if blocks.len() < i {
+                break;
+            } 
             let retry = 20;
             for r in 1..retry {
                 let index_offset: usize;
@@ -107,7 +112,7 @@ impl IntermediateDetector {
                 )
                 .await;
                 if let Ok(detector) = res {
-                    found_transport = Some((
+                    found_detector = Some((
                         detector,
                         ct[..(i + 1) * blk_size].to_vec(),
                         ct[(i + 1) * blk_size..].to_vec(),
@@ -115,12 +120,12 @@ impl IntermediateDetector {
                     break;
                 }
             }
-            if found_transport.is_some() {
+            if found_detector.is_some() {
                 break;
             }
         }
 
-        if let Some((detector, block_prefix, block_suffix)) = found_transport {
+        if let Some((detector, block_prefix, block_suffix)) = found_detector {
             return Ok(Self {
                 base_detector: detector,
                 block_prefix,
@@ -283,7 +288,8 @@ async fn _detect(
         let search_pat = search_pat.clone();
         let semaphore = semaphore.clone();
         futures_set.push(async move {
-            last_blocks[0][blk_size as usize - 1] = i;
+            // retry byte is at pos 0 of the block so we work at pos 1 for detection
+            last_blocks[0][1] = i;
             let sem = semaphore
                 .acquire()
                 .await

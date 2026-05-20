@@ -303,7 +303,7 @@ async fn main() {
                 args.threads,
                 baseline.clone(),
                 search_pat.clone(),
-                args.intermediate_block_index.clone(),
+                args.intermediate_block_index.clone().map(|idx|idx-1),
                 args.inplace,
             )
             .await;
