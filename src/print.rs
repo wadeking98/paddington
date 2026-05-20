@@ -19,7 +19,7 @@ use crate::helper::Messages;
 pub fn fmt_bytes_custom(bytes: &[u8], hex_output: bool) -> String {
     let mut base = String::new();
     for &byte in bytes {
-        if hex_output{
+        if hex_output {
             base += format!("{:02X}", byte).as_str();
         } else if byte.is_ascii_alphanumeric() || byte.is_ascii_punctuation() || byte == 0x20 {
             // Cast to char for printing as a character
@@ -68,13 +68,18 @@ pub fn progress_bar(ct_len: usize, block_len: usize, mut rx: Receiver<Messages>)
                     }
                     Messages::FoundCradle => {
                         cradle_counter += 1;
-                        if cradle_counter <= 1{
+                        if cradle_counter <= 1 {
                             print!("\r\x1B[2K");
-                        }else{
+                        } else {
                             print!("\r\x1B[1A\x1B[2K");
                         }
                         io::stdout().flush().unwrap();
-                        println!("{} {}/{}", "Found Cradle!".green(), cradle_counter, num_blocks);
+                        println!(
+                            "{} {}/{}",
+                            "Found Cradle!".green(),
+                            cradle_counter,
+                            num_blocks
+                        );
                     }
                     _ => (),
                 };

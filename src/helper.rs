@@ -208,23 +208,23 @@ pub fn set_injection_points(transport: &mut HTTPTransport) -> Option<String> {
 }
 
 pub fn unescape(char_str: String) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let mut chars = char_str.chars().peekable();
+    let mut bytes = Vec::new();
+    let mut chars = char_str.chars().peekable();
 
-        while let Some(c) = chars.next() {
-            if c == '\\' && chars.peek() == Some(&'x') {
-                chars.next(); // consume 'x'
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'x') {
+            chars.next(); // consume 'x'
 
-                let hi = chars.next().unwrap_or('0');
-                let lo = chars.next().unwrap_or('0');
+            let hi = chars.next().unwrap_or('0');
+            let lo = chars.next().unwrap_or('0');
 
-                let hex = format!("{}{}", hi, lo);
-                let value = u8::from_str_radix(&hex, 16).unwrap_or(0);
+            let hex = format!("{}{}", hi, lo);
+            let value = u8::from_str_radix(&hex, 16).unwrap_or(0);
 
-                bytes.push(value);
-            } else {
-                bytes.push(c as u8);
-            }
+            bytes.push(value);
+        } else {
+            bytes.push(c as u8);
         }
-        return bytes;
+    }
+    return bytes;
 }

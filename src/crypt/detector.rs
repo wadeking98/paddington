@@ -1,4 +1,8 @@
-use std::{collections::HashMap, error::Error, sync::{Arc, atomic::AtomicBool}};
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use async_trait::async_trait;
 use futures::future::join_all;
@@ -81,7 +85,7 @@ impl IntermediateDetector {
             // make sure we have enough room in blocks
             if blocks.len() < i {
                 break;
-            } 
+            }
             let retry = 20;
             for r in 1..retry {
                 let index_offset: usize;
@@ -200,7 +204,7 @@ pub async fn find_baseline_response(
     search_pat: Option<Regex>,
     threads: usize,
 ) -> Result<String, Box<dyn Error + Send>> {
-    let semaphore =  Arc::new(Semaphore::new(threads));
+    let semaphore = Arc::new(Semaphore::new(threads));
     let prev_result = Arc::new(Mutex::new(None));
     let found_err = Arc::new(AtomicBool::new(false));
     let mut futures = vec![];
@@ -210,12 +214,12 @@ pub async fn find_baseline_response(
         let search_pat = search_pat.clone();
         let found_err = found_err.clone();
         let semaphore = semaphore.clone();
-        futures.push(async move{
+        futures.push(async move {
             let sem = semaphore.acquire().await.expect("Error: semaphore closed");
             let response;
             let response_raw = transport.exec(ct, None, None).await;
             drop(sem);
-            if response_raw.is_err(){
+            if response_raw.is_err() {
                 found_err.store(true, std::sync::atomic::Ordering::SeqCst);
                 return;
             }
@@ -237,7 +241,7 @@ pub async fn find_baseline_response(
         });
     }
     let _ = join_all(futures).await;
-    if found_err.load(std::sync::atomic::Ordering::SeqCst){
+    if found_err.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(Box::new(DecryptError::BaselineError()));
     }
     return Ok(prev_result.lock().await.as_ref().unwrap().to_owned());
@@ -290,10 +294,7 @@ async fn _detect(
         futures_set.push(async move {
             // retry byte is at pos 0 of the block so we work at pos 1 for detection
             last_blocks[0][1] = i;
-            let sem = semaphore
-                .acquire()
-                .await
-                .expect("Error: semaphore closed");
+            let sem = semaphore.acquire().await.expect("Error: semaphore closed");
             let response_result = transport
                 .exec(
                     &last_blocks.iter().flatten().cloned().collect::<Vec<u8>>(),

@@ -66,7 +66,7 @@ async fn gen_byte_fingerprint(
     let mut futures = vec![];
     for byte_raw in 0..=255 {
         let valid_bytes_fingerprint = valid_bytes_fingerprint.clone();
-        futures.push(async move{
+        futures.push(async move {
             let byte_normalized = byte_raw ^ second_last_block[blk_pos];
             let res = check_byte_creates_invalid_pt(
                 detector,
@@ -79,7 +79,7 @@ async fn gen_byte_fingerprint(
                 retry.into(),
             )
             .await;
-            if let Ok(res) = res{
+            if let Ok(res) = res {
                 let mut fingerprint = valid_bytes_fingerprint.lock().await;
                 fingerprint[byte_raw as usize] = res;
             }
@@ -656,9 +656,9 @@ pub async fn build_cradle_2(
     inplace: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), DecryptError> {
     let block_size = cradle_block.len();
-    let generator_prefix = match inplace{
-        true=> &ct_prefix[..ct_prefix.len() - block_size],
-        false=> ct_suffix
+    let generator_prefix = match inplace {
+        true => &ct_prefix[..ct_prefix.len() - block_size],
+        false => ct_suffix,
     };
     let mut prime_generator = _make_prime(
         detector,
@@ -706,7 +706,7 @@ pub async fn build_cradle_2(
             let c2_prime = c2_prime.clone();
             let c1_prime = c1_prime.clone();
             let cradle_indexes_to_set_shared = cradle_indexes_to_set_shared.clone();
-            futures.push(async move{
+            futures.push(async move {
                 let cradle_byte = cradle_block[i];
                 if let Ok(is_invalid) = check_byte_creates_invalid_pt(
                     detector,
@@ -724,7 +724,8 @@ pub async fn build_cradle_2(
                     // on success, set the c1_prime byte to slowly make it into the cradle block
                     new_c1_prime.lock().await[i] = cradle_byte;
                     let mut cradle_indexes_to_set = cradle_indexes_to_set_shared.lock().await;
-                    *cradle_indexes_to_set = cradle_indexes_to_set.clone()
+                    *cradle_indexes_to_set = cradle_indexes_to_set
+                        .clone()
                         .iter()
                         .filter(|idx| **idx != i)
                         .map(|b| *b)

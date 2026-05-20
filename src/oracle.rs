@@ -184,45 +184,44 @@ impl Oracle for IntermediateOracle {
             );
             // do this in sync instead of async, it's better for UX
             //cradle_futures.push(async move {
-                let cradle_res = build_cradle_2(
+            let cradle_res = build_cradle_2(
+                &detector,
+                &block_for_decryption,
+                &detector.block_prefix,
+                &detector.block_suffix,
+                500,
+                Some(prime_cache),
+                self.inplace,
+            )
+            .await;
+            if let Ok(cradle) = cradle_res {
+                cradles.lock().await[i - 1] = Some(cradle.clone());
+                let _ = tx.send(Messages::FoundCradle).await;
+                let (ct_prefix, ct_suffix) = match self.inplace {
+                    false => (detector.block_prefix.clone(), detector.block_suffix.clone()),
+                    true => (
+                        detector.block_prefix[..detector.block_prefix.len() - block_size].to_vec(),
+                        detector.block_suffix[2 * block_size..].to_vec(),
+                    ),
+                };
+                let (pt, _) = decrypt_intermediate_block(
                     &detector,
+                    &bad_chars,
+                    &iv,
+                    &cradle.0,
                     &block_for_decryption,
-                    &detector.block_prefix,
-                    &detector.block_suffix,
-                    500,
-                    Some(prime_cache),
-                    self.inplace,
+                    &ct_prefix,
+                    &[cradle.1, ct_suffix.clone()].concat(),
+                    self.block_size,
+                    msg_forwarder.local_tx.clone(),
                 )
-                .await;
-                if let Ok(cradle) = cradle_res {
-                    cradles.lock().await[i - 1] = Some(cradle.clone());
-                    let _ = tx.send(Messages::FoundCradle).await;
-                    let (ct_prefix, ct_suffix) = match self.inplace {
-                        false => (detector.block_prefix.clone(), detector.block_suffix.clone()),
-                        true => (
-                            detector.block_prefix[..detector.block_prefix.len() - block_size]
-                                .to_vec(),
-                            detector.block_suffix[2 * block_size..].to_vec(),
-                        ),
-                    };
-                    let (pt, _) = decrypt_intermediate_block(
-                        &detector,
-                        &bad_chars,
-                        &iv,
-                        &cradle.0,
-                        &block_for_decryption,
-                        &ct_prefix,
-                        &[cradle.1, ct_suffix.clone()].concat(),
-                        self.block_size,
-                        msg_forwarder.local_tx.clone(),
-                    )
-                    .await
-                    .unwrap();
-                    let mut pt_buff = pt_buffer.lock().await;
-                    pt_buff[i - 1] = pt;
-                } else {
-                    println!("{:?}", cradle_res.err())
-                }
+                .await
+                .unwrap();
+                let mut pt_buff = pt_buffer.lock().await;
+                pt_buff[i - 1] = pt;
+            } else {
+                println!("{:?}", cradle_res.err())
+            }
             //});
         }
         //join_all(cradle_futures).await;

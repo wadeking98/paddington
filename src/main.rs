@@ -194,10 +194,14 @@ async fn main() {
             ciphertext = standard_ct.clone();
         }
 
-        let baseline =
-            find_baseline_response(&standard_ct, standard_transport.clone(), search_pat.clone(), args.threads)
-                .await
-                .ok();
+        let baseline = find_baseline_response(
+            &standard_ct,
+            standard_transport.clone(),
+            search_pat.clone(),
+            args.threads,
+        )
+        .await
+        .ok();
 
         // find ct_len for the progress bar
         let mut ct_len = standard_ct.len() - *block_size as usize;
@@ -268,7 +272,7 @@ async fn main() {
             if let Ok(detector) = detect {
                 println!("{}", "Double Oracle Detected".green());
                 let (tx, rx) = mpsc::channel(255);
-                let close_progress = progress_bar(ct_len, *block_size as usize,rx);
+                let close_progress = progress_bar(ct_len, *block_size as usize, rx);
                 let double_oracle =
                     DoubleOracle::new(detector, tx, &standard_ct, *block_size as usize, args.retry);
                 if let Some(ref pt) = args.forge {
@@ -303,12 +307,16 @@ async fn main() {
                 args.threads,
                 baseline.clone(),
                 search_pat.clone(),
-                args.intermediate_block_index.clone().map(|idx|idx-1),
+                args.intermediate_block_index.clone().map(|idx| idx - 1),
                 args.inplace,
             )
             .await;
             if let Ok(detector) = detect {
-                println!("{} {}", "Intermediate Oracle Detected at Block Index".green(), detector.block_prefix.len()/(*block_size) as usize);
+                println!(
+                    "{} {}",
+                    "Intermediate Oracle Detected at Block Index".green(),
+                    detector.block_prefix.len() / (*block_size) as usize
+                );
                 //if attack style is in place, make sure there's enough room after the injection point
                 if detector.block_suffix.len() < 3 * (*block_size as usize) && args.inplace {
                     println!("{}", "Not enough space to perform in place attack".red());
@@ -316,7 +324,7 @@ async fn main() {
                 }
                 let bad_chars = unescape(args.bad_chars.unwrap_or(String::from("")));
                 let (tx, rx) = mpsc::channel(255);
-                let close_progress = progress_bar(ct_len, *block_size as usize ,rx);
+                let close_progress = progress_bar(ct_len, *block_size as usize, rx);
                 //no bad chars provided, detect them
                 if bad_chars.len() <= 0 {
                     print!("\r\x1B[2K");
