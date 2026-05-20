@@ -83,7 +83,7 @@ impl IntermediateDetector {
         // use some randomness here so we can build a picture of dif regions
         for i in search_range {
             // make sure we have enough room in blocks
-            if blocks.len() < i {
+            if blocks.len() - 1 <= i {
                 break;
             }
             let retry = 20;

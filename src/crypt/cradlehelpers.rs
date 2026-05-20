@@ -658,13 +658,36 @@ pub async fn build_cradle_2(
     let block_size = cradle_block.len();
     let generator_prefix = match inplace {
         true => &ct_prefix[..ct_prefix.len() - block_size],
-        false => ct_suffix,
+        false => ct_prefix,
+    };
+    let generator_suffix = match inplace {
+        true => ct_suffix,
+        false => {
+            if let Some(Some(ct_prime)) = _make_prime(
+                detector,
+                &ct_prefix[ct_prefix.len() - block_size..],
+                ct_prefix,
+                ct_suffix,
+                retry,
+                None,
+                prime_cache.clone(),
+            )
+            .next()
+            .await
+            {
+                &[&ct_prime, ct_suffix].concat()
+            } else {
+                return Err(DecryptError::CradleBuildIssue(
+                    "Could not initialize prime generator".to_string(),
+                ));
+            }
+        }
     };
     let mut prime_generator = _make_prime(
         detector,
         &ct_prefix[ct_prefix.len() - block_size..],
         generator_prefix,
-        ct_suffix,
+        generator_suffix,
         retry,
         Some(MakePrimeOptions {
             high_entropy: Some(true),
