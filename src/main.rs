@@ -188,10 +188,15 @@ async fn main() {
         let standard_ct = standard_transport.base_ct.clone();
         let ciphertext;
         if let Some(ref ct) = args.ciphertext {
-            ciphertext = decode_ct(ct.clone(), args.encoding);
+            ciphertext = decode_ct(ct.clone(), args.encoding.clone());
         } else {
             ciphertext = standard_ct.clone();
         }
+        //add iv onto the ciphertext if specified
+        let ciphertext = match args.iv {
+            Some(ref str) => [decode_ct(str.clone(), args.encoding),ciphertext].concat(),
+            None => ciphertext
+        };
 
         let baseline = find_baseline_response(
             &standard_ct,
