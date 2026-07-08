@@ -113,6 +113,7 @@ impl IntermediateDetector {
                     threads,
                     baseline.clone(),
                     search_pat.clone(),
+                    Some(1)
                 )
                 .await;
                 if let Ok(detector) = res {
@@ -169,7 +170,7 @@ impl SimpleDetector {
         Self: Sized,
     {
         _detect(
-            ct, ct_prefix, None, transport, blk_size, threads, baseline, search_pat,
+            ct, ct_prefix, None, transport, blk_size, threads, baseline, search_pat, None
         )
         .await
     }
@@ -256,7 +257,9 @@ async fn _detect(
     threads: usize,
     baseline: Option<String>,
     search_pat: Option<Regex>,
+    detect_pos: Option<usize>
 ) -> Result<SimpleDetector, DecryptError> {
+    let detect_pos = detect_pos.unwrap_or(blk_size-1);
     let semaphore = Arc::new(Semaphore::new(threads));
     let blocks: Vec<Vec<u8>> = ct
         .chunks(blk_size.into())
@@ -292,8 +295,8 @@ async fn _detect(
         let search_pat = search_pat.clone();
         let semaphore = semaphore.clone();
         futures_set.push(async move {
-            // retry byte is at pos 0 of the block so we work at pos 1 for detection
-            last_blocks[0][1] = i;
+            // for intermediate oracle detection retry byte is at pos 0 of the block so we work at pos 1 for detection, otherwise we use last char
+            last_blocks[0][detect_pos] = i;
             let sem = semaphore.acquire().await.expect("Error: semaphore closed");
             let response_result = transport
                 .exec(

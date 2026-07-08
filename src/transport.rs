@@ -165,7 +165,7 @@ impl HTTPTransport {
         }
         let mut transport = Self {
             url,
-            headers,
+            headers: headers.clone(),
             method,
             data,
             encoding,
@@ -176,6 +176,6 @@ impl HTTPTransport {
         let ct = set_injection_points(&mut transport).expect("Error: No injection points found");
         let ct = decode_ct(ct, transport.encoding.clone());
         transport.base_ct = ct;
-        return transport;
+        return transport.clone();
     }
 }

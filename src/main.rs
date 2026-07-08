@@ -176,7 +176,6 @@ async fn main() {
                 headers.push((header_parts[0].clone(), header_val));
             }
         }
-
         let standard_transport = Box::new(HTTPTransport::new(
             (&args.url).to_owned().clone(),
             headers.clone(),

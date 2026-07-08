@@ -6,6 +6,8 @@ use serde_json::Value;
 use std::{collections::HashMap, string::FromUtf8Error};
 use strum_macros::Display;
 use urlencoding::{decode, encode};
+use itertools::Itertools;
+
 
 use crate::transport::HTTPTransport;
 
@@ -128,7 +130,7 @@ fn search_json_obj(
 pub fn set_injection_points(transport: &mut HTTPTransport) -> Option<String> {
     let mut found_ct = None;
     let injection_point = String::from("@{INJECT_HERE}@");
-    for p in transport.params.clone() {
+    for p in transport.params.clone().into_iter().unique() {
         for i in 0..transport.headers.len() {
             if transport.headers[i].0 == p {
                 found_ct = Some(transport.headers[i].1.clone());
