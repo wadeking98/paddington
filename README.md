@@ -44,14 +44,20 @@ Padding Oracles Ain't Dead!
 Usage: paddington [OPTIONS] --url <URL>
 
 Options:
-  -u, --url <URL>                url for the vulnerable endpoint
-  -p, --params <PARAMS>          params to scan, can be url parameters, body parameters, or headers, alternatively surround the value you want to analyze with "@{ }@"
+  -u, --url <URL>                url for the vulnerable endpoint. Optional when --request-file is provided (the
+                                 origin is then derived from the request's Host header). When both are given, this
+                                 is the origin the path in the request file is relative to
+      --request-file <REQUEST_FILE>
+                                 path to a raw HTTP request file (as exported from Burp Suite). The url, method, headers,
+                                 and body are read from this file, so you only need to specify the injection point with -p
+  -p, --params <PARAMS>          params to scan, can be url parameters, body parameters, or headers. Alternatively, wrap the value you want to analyze with "@{ }@" inline in the url/headers/body (or a --request-file) instead of using -p
   -H, --headers <HEADERS>        add headers to the request
-  -d, --data <DATA>              add the request body
+  -B, --body <BODY>              add the request body (--data is accepted as an alias)
   -m, --method <METHOD>          the request method to use [default: GET]
-  -e, --encoding <ENCODING>      the encoding to use for the bytes, you can specify multiple encodings and they will be used in order.
-                                 example: if a string is base64 encoded then URL encoded, use "-e url" to url decode, and then 
-                                 "-e b64" to base64 decode [default: b64] [possible values: hex, b64, b64-url, url]
+  -d, --decode <DECODE>          how to decode the target token. Specify each encoding layer in the order it should be
+                                 removed. For example, if the token is base64 encoded then URL encoded, use "-d url -d b64"
+                                 to URL decode, then base64 decode. If no encodings are specified, the encoding is
+                                 automatically detected from the token [default: auto] [possible values: hex, b64, b64-url, url]
   -t, --threads <THREADS>        the number of threads to use [default: 10]
   -f, --forge <FORGE>            the plaintext to forge
   -b, --block-size <BLOCK_SIZE>  the block size to use (small = 8) (med = 16) (large = 32) [default: AUTO] [possible values: small, med, large, auto]
@@ -59,13 +65,59 @@ Options:
       --proxy <PROXY>            the proxy to use
   -c, --ciphertext <CIPHERTEXT>  override the ciphertext to use
   -i, --iv <IV>                  add a prefix to the ciphertext (IV) encoded the same way as the ciphertext
-  -a, --attack <ATTACK>          the attack type to use, (single = standard attack) (double = double ciphertext attack) 
-                                 (inter = intermediate ciphertext attack) [default: ALL] [possible values: double, single, inter, all]
+  -a, --attack <ATTACK>          the attack type to use, (single = standard attack) (double = double ciphertext attack)
+                                 (inter = intermediate ciphertext attack) (quick = single + double) (all = single + double + intermediate) [default: quick] [possible values: double, single, inter, quick, all]
   -r, --retry <RETRY>            number of times to retry when no valid byte found [default: 5]
       --bad-chars <BAD_CHARS>    known bad characters used for intermediate oracle. You don't need to list all invalid bytes for the attack to work, only a few are needed. The default configuration is best for JSON on Node, PHP, etc. The intermediate oracle doesn't work great for most Python apps at the moment. add bad bytes like so '\x00\x01\x02"\xff}{[]!'
+      --with-padding             when decrypting, keep the PKCS#7 padding bytes in the output. By default the padding is stripped
   -h, --help                     Print help
   -V, --version                  Print version
 ```
+
+## Using a saved request file
+Instead of typing out the method, headers, body, and URL manually, you can point
+Paddington at a raw HTTP request that you exported from Burp Suite.
+
+In Burp Suite, right-click a request and choose **Copy as curl command** or export
+the raw request, then save it to a file. For example a file `request.txt`:
+
+```http
+POST /api/decrypt HTTP/1.1
+Host: example.com
+Content-Type: application/json
+Cookie: session=abc123
+
+{"data":"<BASE64_CIPHERTEXT>"}
+```
+
+Then run Paddington, marking the injection point with `-p`. The `--url` flag is
+optional when a request file is provided — the origin is derived from the
+request's `Host` header, and Paddington will probe the endpoint over both
+`https` and `http` to automatically determine which scheme is in use (the
+request line and `Host` header don't carry the scheme):
+
+> paddington --request-file request.txt -p data
+
+You can still pass `--url` to override the origin (e.g. for an `http://` host, or
+when the request line already contains an absolute URL). The method, url,
+headers, and body are read from the file automatically. Extra headers can still
+be merged in with `-H`, and the body/url can be overridden with `-B` / `-u`.
+
+Instead of naming a parameter with `-p`, you can also mark the injection point
+inline by wrapping the ciphertext value with `@{ }@` directly in the url,
+headers, or body. This is especially convenient with `--request-file`, since
+you can just wrap the target value in the saved request:
+
+```http
+POST /api/decrypt HTTP/1.1
+Host: example.com
+Content-Type: application/json
+Cookie: session=abc123
+
+{"data":"@{BASE64_CIPHERTEXT}@"}
+```
+
+> paddington --request-file request.txt
 
 ## Install
 > git clone https://github.com/wadeking98/paddington.git  

@@ -1,5 +1,4 @@
 use std::{
-    cmp::min,
     collections::HashMap,
     io::{self, Write},
     sync::Arc,
@@ -105,18 +104,50 @@ pub fn progress_bar(ct_len: usize, block_len: usize, mut rx: Receiver<Messages>)
                 }
                 curr_results[i] = *loading_map.get(&curr_results[i]).unwrap_or(&b'-');
             }
+
+            // determine how many bytes we can display so the rendered string
+            // fits within the terminal width. Non-printable bytes expand to
+            // 4 chars ("\xNN") when rendered, so we measure display width as we go.
+            let term_width = terminal_size::terminal_size()
+                .map(|(w, _)| w.0 as usize)
+                .unwrap_or(80);
+            // reserve a few chars for the "..." suffix when truncating
+            let ellipsis_len = "...".len();
+            let budget = if term_width > ellipsis_len {
+                term_width - ellipsis_len
+            } else {
+                term_width
+            };
+
             let working_chunk = curr_results_modified
                 .chunks(truncate_len)
                 .position(|c| c.contains(&false) && c.contains(&true))
                 .unwrap_or(0);
+            let start = working_chunk * truncate_len;
 
-            let end = min((working_chunk + 1) * truncate_len, curr_results.len());
-            let curr_results_slice = &curr_results[working_chunk * truncate_len..end];
+            // walk forward from the working chunk start, accumulating display
+            // width, until we run out of budget or hit the end of the results.
+            let mut display_width = 0usize;
+            let mut end = start;
+            for (i, &b) in curr_results[start..].iter().enumerate() {
+                let w = if b.is_ascii_alphanumeric() || b.is_ascii_punctuation() || b == 0x20 {
+                    1
+                } else {
+                    4 // rendered as \xNN
+                };
+                if display_width + w > budget {
+                    break;
+                }
+                display_width += w;
+                end = start + i + 1;
+            }
+
+            let curr_results_slice = &curr_results[start..end];
             let byte_string = fmt_bytes_custom(&curr_results_slice, false);
             print!("\r\x1B[2K");
             io::stdout().flush().unwrap();
             print!("{}", byte_string);
-            if ct_len > truncate_len {
+            if end < curr_results.len() {
                 print!("...");
             }
 

@@ -3,7 +3,7 @@ use std::{error::Error, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use reqwest::{Client, Method, Proxy, redirect::Policy};
 
-use crate::helper::{Encoding, decode_ct, encode_ct, set_injection_points};
+use crate::helper::{Encoding, decode_ct, detect_encoding, encode_ct, set_injection_points};
 
 #[async_trait]
 pub trait Transport: 'static + Send + Sync {
@@ -45,7 +45,7 @@ pub struct HTTPTransport {
     pub(crate) headers: Vec<(String, String)>,
     method: Method,
     pub(crate) data: Option<String>,
-    encoding: Vec<Encoding>,
+    pub(crate) encoding: Vec<Encoding>,
     pub(crate) params: Vec<String>,
     pub(crate) base_ct: Vec<u8>,
     proxy: Option<Proxy>,
@@ -174,7 +174,14 @@ impl HTTPTransport {
             proxy: prox,
         };
         let ct = set_injection_points(&mut transport).expect("Error: No injection points found");
-        let ct = decode_ct(ct, transport.encoding.clone());
+        // auto-detect the encoding if none was explicitly provided
+        let encoding = if transport.encoding.is_empty() {
+            detect_encoding(&ct)
+        } else {
+            transport.encoding.clone()
+        };
+        transport.encoding = encoding.clone();
+        let ct = decode_ct(ct, encoding);
         transport.base_ct = ct;
         return transport.clone();
     }

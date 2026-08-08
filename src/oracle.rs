@@ -149,16 +149,21 @@ impl IntermediateOracle {
 #[async_trait]
 impl Oracle for IntermediateOracle {
     async fn decrypt(&self, ct: &[u8]) -> Result<Vec<u8>, DecryptError> {
+        let block_size = self.block_size;
         let chunks = ct
             .to_vec()
-            .chunks(self.block_size)
+            .chunks(block_size)
             .map(|chunk| chunk.to_vec())
             .collect::<Vec<Vec<u8>>>();
+        // pt_buffer holds one entry per ciphertext block (all blocks except the
+        // IV at index 0, which is known and doesn't need decryption). The loop
+        // iterates i from chunks.len()-1 down to 1, so block 0 (the IV) is never
+        // decrypted, but block 1 (the first ciphertext block) is — using the
+        // IV (chunks[0]) as its previous block.
         let pt_buffer = Arc::new(Mutex::new(vec![
-            vec![0u8; self.block_size];
+            vec![0u8; block_size];
             chunks.len() - 1
         ]));
-        let block_size = self.block_size;
         let cradles = Arc::new(Mutex::new(vec![None; chunks.len() - 1]));
         //let mut cradle_futures = vec![];
         let prime_cache: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>> =

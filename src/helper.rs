@@ -19,6 +19,94 @@ pub enum Encoding {
     URL,
 }
 
+/// Strip standard PKCS#7 padding from a decrypted plaintext.
+///
+/// Returns the plaintext with the trailing padding bytes removed. If the
+/// padding is invalid (the last byte is 0, larger than the block size, or the
+/// trailing bytes don't all match the padding length), the original plaintext
+/// is returned unchanged so the user still sees the raw output.
+pub fn strip_pkcs7(pt: &[u8], block_size: usize) -> Vec<u8> {
+    if pt.is_empty() || block_size == 0 {
+        return pt.to_vec();
+    }
+    let pad_len = *pt.last().unwrap() as usize;
+    if pad_len == 0 || pad_len > block_size || pad_len > pt.len() {
+        // invalid or no padding, return as-is
+        return pt.to_vec();
+    }
+    // all trailing pad_len bytes must equal pad_len
+    if pt[pt.len() - pad_len..].iter().all(|b| *b as usize == pad_len) {
+        pt[..pt.len() - pad_len].to_vec()
+    } else {
+        pt.to_vec()
+    }
+}
+
+/// Automatically detect the encoding layers of a captured ciphertext string.
+///
+/// Detection is performed by repeatedly peeling off the outermost encoding
+/// layer until the string no longer matches a known encoding. The order of
+/// detection is:
+///   1. URL encoding (if the string contains `%XX` sequences)
+///   2. Hex (only `[0-9a-fA-F]`, even length)
+///   3. Base64-URL (only `[-_A-Za-z0-9]`, no padding)
+///   4. Base64 (only `[A-Za-z0-9+/=]`)
+///
+/// The returned `Vec<Encoding>` is ordered outer-to-inner so it can be passed
+/// directly to `decode_ct`. If no encoding is recognized, `[Encoding::B64]` is
+/// returned as a sensible default (the original implicit default).
+pub fn detect_encoding(ct: &str) -> Vec<Encoding> {
+    let mut layers = Vec::new();
+    let mut current = ct.to_string();
+    // cap the number of layers we peel off to avoid pathological loops
+    for _ in 0..4 {
+        let url_re = Regex::new(r"%[0-9a-fA-F]{2}").unwrap();
+        if url_re.is_match(&current) {
+            // only treat as url-encoded if there's actually a %XX sequence
+            layers.push(Encoding::URL);
+            if let Ok(decoded) = decode(&current) {
+                current = decoded.to_string();
+                continue;
+            } else {
+                break;
+            }
+        }
+        if !current.is_empty()
+            && current.chars().all(|c| c.is_ascii_hexdigit())
+            && current.len() % 2 == 0
+        {
+            layers.push(Encoding::HEX);
+            break;
+        }
+        if !current.is_empty()
+            && current.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && current.chars().any(|c| c == '-' || c == '_')
+        {
+            // contains the url-safe base64 chars '-' or '_', treat as b64-url
+            layers.push(Encoding::B64Url);
+            break;
+        }
+        if !current.is_empty()
+            && current
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+            && current.chars().any(|c| c.is_alphanumeric())
+        {
+            layers.push(Encoding::B64);
+            break;
+        }
+        // fall back to default base64
+        if layers.is_empty() {
+            layers.push(Encoding::B64);
+        }
+        break;
+    }
+    if layers.is_empty() {
+        layers.push(Encoding::B64);
+    }
+    layers
+}
+
 #[derive(Debug)]
 pub enum Messages {
     OracleConfirmed,
@@ -127,9 +215,63 @@ fn search_json_obj(
     None
 }
 
+/// Search the transport's url, headers, and body for a `@{<ciphertext>}@`
+/// marker. The first match found has its inner ciphertext captured and the
+/// whole marker replaced with `injection_point` (`@{INJECT_HERE}@`). This lets
+/// a user mark an injection point inline (e.g. via a Burp request file)
+/// without having to name the parameter with `-p`.
+fn find_inline_injection_point(
+    transport: &mut HTTPTransport,
+    injection_point: &str,
+) -> Option<String> {
+    // match @{...}@, capturing the inner ciphertext. The inner match is
+    // non-greedy so it stops at the first "}@". This is unambiguous for the
+    // common encodings (base64, hex, url) which never contain the "}@" sequence.
+    let re = Regex::new(r"@\{([^@]*?)\}@").unwrap();
+    let extract = |text: String| -> Option<(String, String)> {
+        re.captures(&text)
+            .map(|cap| (cap[1].to_string(), cap[0].to_string()))
+    };
+
+    // url
+    if let Some((inner, full)) = extract(transport.url.clone()) {
+        transport.url = transport.url.replace(&full, injection_point);
+        return Some(inner);
+    }
+
+    // headers
+    for header in transport.headers.iter_mut() {
+        if let Some((inner, full)) = extract(header.1.clone()) {
+            header.1 = header.1.replace(&full, injection_point);
+            return Some(inner);
+        }
+    }
+
+    // body
+    if let Some(ref mut body) = transport.data {
+        if let Some((inner, full)) = extract(body.clone()) {
+            *body = body.replace(&full, injection_point);
+            return Some(inner);
+        }
+    }
+
+    None
+}
+
 pub fn set_injection_points(transport: &mut HTTPTransport) -> Option<String> {
     let mut found_ct = None;
     let injection_point = String::from("@{INJECT_HERE}@");
+
+    // Support the "@{<ciphertext>}@" marker syntax as an alternative to -p.
+    // A user can wrap the value they want to analyze directly in the url,
+    // headers, or body, e.g. `--url "https://t/@{BASE64CT}@"`. Here we find
+    // the first occurrence, capture the wrapped ciphertext, and replace the
+    // whole marker with the internal "@{INJECT_HERE}@" placeholder so the
+    // transport's exec() can substitute the modified ciphertext later.
+    if found_ct.is_none() {
+        found_ct = find_inline_injection_point(transport, &injection_point);
+    }
+
     for p in transport.params.clone().into_iter().unique() {
         for i in 0..transport.headers.len() {
             if transport.headers[i].0 == p {
@@ -207,6 +349,114 @@ pub fn set_injection_points(transport: &mut HTTPTransport) -> Option<String> {
         }
     }
     return found_ct;
+}
+
+/// A parsed raw HTTP request (e.g. one copied from Burp Suite).
+#[derive(Debug, Clone)]
+pub struct ParsedRequest {
+    pub method: String,
+    /// The full URL (scheme + host + path + query). If the raw request only
+    /// contains a path, `base_url` is used to complete it.
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<String>,
+    /// Whether the URL scheme was inferred (rather than explicitly provided via
+    /// an absolute request line or `--url`). When true, the scheme should be
+    /// probed to confirm whether http or https is in use.
+    pub scheme_inferred: bool,
+}
+
+/// Parse a raw HTTP request as it might be exported from Burp Suite.
+///
+/// The raw request must start with a request line like:
+///   `GET /path HTTP/1.1`
+/// followed by headers and, after a blank line, an optional body.
+///
+/// Since raw requests typically only include the path (not the scheme/host),
+/// `base_url` should be the origin (e.g. `https://example.com`) that the path
+/// is relative to. It is ignored if the request line already contains an
+/// absolute URL. If `base_url` is empty, the origin is derived from the
+/// request's `Host` header (defaulting to `https://`).
+pub fn parse_request_file(
+    content: String,
+    base_url: Option<&str>,
+    headers: Option<&[(String, String)]>,
+) -> Result<ParsedRequest, String> {
+    let mut lines = content.lines();
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "request file is empty".to_string())?
+        .trim();
+
+    // split request line into METHOD SP PATH SP VERSION
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "request line is missing method".to_string())?
+        .to_uppercase();
+    let target = parts
+        .next()
+        .ok_or_else(|| "request line is missing target".to_string())?
+        .to_string();
+
+    let mut req_headers: Vec<(String, String)> = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            // remaining lines are the body
+            break;
+        }
+        if let Some(idx) = line.find(':') {
+            let name = line[..idx].trim().to_string();
+            let value = line[idx + 1..].trim().to_string();
+            req_headers.push((name, value));
+        }
+    }
+
+    // body is everything after the first blank line
+    let body = content
+        .split_once("\r\n\r\n")
+        .or_else(|| content.split_once("\n\n"))
+        .map(|(_, body)| body.trim_end_matches('\n').to_string())
+        .filter(|b| !b.is_empty());
+
+    // build the url. If the target is already absolute, use it directly.
+    let (url, scheme_inferred) = if target.starts_with("http://") || target.starts_with("https://") {
+        (target, false)
+    } else {
+        // prefer an explicit base_url, otherwise derive from the Host header
+        let origin = if let Some(b) = base_url.filter(|b| !b.is_empty()) {
+            b.trim_end_matches('/').to_string()
+        } else {
+            let host = req_headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("host"))
+                .map(|(_, v)| v.trim().to_string())
+                .or_else(|| {
+                    headers
+                        .and_then(|h| h.iter().find(|(n, _)| n.eq_ignore_ascii_case("host")))
+                        .map(|(_, v)| v.trim().to_string())
+                })
+                .ok_or_else(|| {
+                    "no --url provided and request has no Host header to derive the origin from"
+                        .to_string()
+                })?;
+            // default to https since raw requests don't carry the scheme. The
+            // scheme is inferred here, so the caller should probe to confirm.
+            format!("https://{host}", host = host.trim_end_matches('/'))
+        };
+        (
+            format!("{origin}{}", if target.starts_with('/') { target } else { format!("/{target}") }),
+            base_url.is_none() || base_url.is_some_and(|b| b.is_empty()),
+        )
+    };
+
+    Ok(ParsedRequest {
+        method,
+        url,
+        headers: req_headers,
+        body,
+        scheme_inferred,
+    })
 }
 
 pub fn unescape(char_str: String) -> Vec<u8> {
